@@ -27,14 +27,24 @@ const sh = (args, opts = {}) => spawnSync('sh', [SCRIPT, ...args], { encoding: '
 // The listing `summarize` reads by default: the stdout of `cargo nextest
 // list --message-format oneline --verbose` (nextest 0.9) for a run of the
 // three selections, shortened: the selected tests, then tests of the same
-// binaries that the filterset leaves out, which end in ` (skipped)`.
-const SELECTED = [
-  'skyoauth-operator::operator local_path::socket_path_cases_match_check_socket',
-  'skyoauth-operator::operator local_path::the_socket_must_be_the_expected_owners',
-  'skyoauth-scenarios::pg harness::socket_path_fixture::socket_path_fixture_cases_match_the_services_bind',
-  'skyoauth-service::local_transport a_peer_of_another_uid_is_refused',
-  'skyoauth-service::local_transport the_service_uid_cannot_redirect_a_bind',
+// binaries that the filterset leaves out, which end in ` (skipped)`. The
+// selected tests are the script's REQUIRED ones and one more of each
+// selection (EXTRA, which no check requires by name).
+// The script's SELECTIONS, as [binary ID, test name prefix] pairs.
+const SELECTIONS = /^SELECTIONS='([^']*)'$/m
+  .exec(readFileSync(SCRIPT, 'utf8'))[1]
+  .split('\n')
+  .map((l) => [l.split(' ')[0], l.split(' ')[1] ?? '']);
+const REQUIRED = /^REQUIRED='([^']*)'$/m.exec(readFileSync(SCRIPT, 'utf8'))[1].split('\n');
+const EXTRA = [
+  'skyoauth-operator::operator local_path::a_relative_path_is_checked_as_its_absolute_form',
+  'skyoauth-scenarios::pg harness::socket_path_fixture::socket_path_fixture_outcomes_are_complete',
+  'skyoauth-service::local_transport a_socket_path_up_to_the_limit_works',
 ];
+const SELECTED = [...EXTRA, ...REQUIRED];
+const N = SELECTED.length;
+// How many of these tests are in the selection of this binary.
+const inBinary = (bin, tests = SELECTED) => tests.filter((t) => t.startsWith(`${bin} `)).length;
 const LEFT_OUT = [
   'skyoauth-operator::operator challenge::challenge_fixture_envelope_matches_the_crate',
   'skyoauth-operator::operator identity_bounds_and_form',
@@ -54,8 +64,9 @@ const LIST_WRAPPER = 'out=$1; shift; exec "$@" > "$out"';
 
 // Runs `summarize` on a log with this text (null: no log file) and a
 // listing (null: no listing file) and returns { status, stdout, stderr,
-// summary, lines }: `lines` are stdout's lines (its annotations, then the
-// summary's section between SECTION_START and SECTION_END).
+// summary, lines }: `lines` are stdout's lines (its error and warning
+// annotations, the summary's section between SECTION_START and
+// SECTION_END, then the counts' `::notice::`).
 function summarize(text, userns = '0', status = '0', list = LISTING, listStatus = '0') {
   const log = fresh('run.log');
   if (text !== null) writeFileSync(log, text);
@@ -83,8 +94,11 @@ const log = (...lines) => `${START}${passLines()}${lines.map((l) => `${l}\n`).jo
 const withSummary = (line) => `${START}${passLines()}     ${line}\n`;
 const errors = (r) => r.lines.filter((l) => l.startsWith('::error::'));
 const warnings = (r) => r.lines.filter((l) => l.startsWith('::warning::'));
-// The script's own workflow commands: stdout's lines that start with `::`.
-const annotations = (r) => r.lines.filter((l) => l.startsWith('::'));
+// The script's error and warning annotations, in order.
+const annotations = (r) => r.lines.filter((l) => l.startsWith('::error::') || l.startsWith('::warning::'));
+// The counts' notice, and every workflow command the script prints.
+const countNotices = (r) => r.lines.filter((l) => l.startsWith('::notice::'));
+const ownCommands = (r) => r.lines.filter((l) => l.startsWith('::'));
 const SECTION_START = 'Root-only tests summary:';
 const SECTION_END = 'End of the root-only tests summary.';
 // What `summarize` appended to GITHUB_STEP_SUMMARY (after the earlier
@@ -103,10 +117,158 @@ const appended = (r) => {
 const commands = (stdout) => stdout.split(/\r\n|\r|\n/).filter((l) => l.trimStart().startsWith('::') || l.includes('##['));
 const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const HEADING = '### Root-only tests: `local_transport`, operator `local_path`, `harness::socket_path_fixture`';
+const LT = inBinary('skyoauth-service::local_transport');
+const OP = inBinary('skyoauth-operator::operator');
+const PG = inBinary('skyoauth-scenarios::pg');
 const COUNTS =
-  '- `skyoauth-service::local_transport`: 2 of 2 selected tests ran and passed\n' +
-  '- `skyoauth-operator::operator` `local_path::*`: 2 of 2 selected tests ran and passed\n' +
-  '- `skyoauth-scenarios::pg` `harness::socket_path_fixture::*`: 1 of 1 selected tests ran and passed\n';
+  `- \`skyoauth-service::local_transport\`: ${LT} of ${LT} selected tests ran and passed\n` +
+  `- \`skyoauth-operator::operator\` \`local_path::*\`: ${OP} of ${OP} selected tests ran and passed\n` +
+  `- \`skyoauth-scenarios::pg\` \`harness::socket_path_fixture::*\`: ${PG} of ${PG} selected tests ran and passed\n` +
+  `- Required root-only tests (REQUIRED in scripts/ci/root-transport-run.sh): ${REQUIRED.length} of ${REQUIRED.length} ran and passed\n`;
+const requiredError = (t, why) => `::error::required root-only test ${t} did not run: ${why}`;
+
+// The notice kinds: a string each notice holds, and whether it fails the
+// step or warns (the script's comment lists them; NOTICE_FAILS the first).
+const KINDS = [
+  ['SKYOAUTH_IT_PEER_USER is not set', 'fails'],
+  ['socket path cases were NOT run: they need root', 'fails'],
+  ['socket path cases were NOT bound by the service', 'fails'],
+  ['the owner check needs root: it was NOT tried', 'fails'],
+  ['no socket path case was bound by the service: it binds on Linux', 'fails'],
+  ['this kernel follows at most', 'warns'],
+  ["is not root's, sticky and writable by all: the shared directory was NOT tried in it", 'warns'],
+  ['the working directory is too long for a relative socket path', 'warns'],
+  ['/proc/self/fd is missing', 'warns'],
+  ['a bind without /proc was NOT tested', 'warns'],
+  ['a user namespace was denied', 'warns'],
+];
+
+// The string literals of Rust source, each { text, line } (the text as
+// written, escapes and all), skipping comments and char literals.
+function stringLiterals(src) {
+  const out = [];
+  let line = 1;
+  const advance = (from, to) => {
+    for (let k = from; k < to; k++) if (src[k] === '\n') line++;
+    return to;
+  };
+  let i = 0;
+  while (i < src.length) {
+    if (src.startsWith('//', i)) {
+      const j = src.indexOf('\n', i);
+      i = j < 0 ? src.length : j;
+      continue;
+    }
+    if (src.startsWith('/*', i)) {
+      i = advance(i, src.indexOf('*/', i + 2) + 2);
+      continue;
+    }
+    const raw = /^b?r(#*)"/.exec(src.slice(i, i + 16));
+    if (raw && !/\w/.test(src[i - 1] ?? '')) {
+      const close = `"${raw[1]}`;
+      const from = i + raw[0].length;
+      const to = src.indexOf(close, from);
+      out.push({ text: src.slice(from, to), line });
+      i = advance(i, to + close.length);
+      continue;
+    }
+    if (src[i] === '"') {
+      let j = i + 1;
+      while (src[j] !== '"') j += src[j] === '\\' ? 2 : 1;
+      out.push({ text: src.slice(i + 1, j), line });
+      i = advance(i, j + 1);
+      continue;
+    }
+    if (src[i] === "'") {
+      const ch = /^'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^\\'\n])'/.exec(src.slice(i, i + 12));
+      i += ch ? ch[0].length : 1;
+      continue;
+    }
+    i = advance(i, i + 1);
+  }
+  return out;
+}
+
+// The files a test target compiles in, from its crate root: { file, path }
+// with the module path (`a::b::`) of each, following `mod NAME;`, inline
+// `mod NAME { ... }` (closed by a `}` at its indentation, as rustfmt writes
+// it) and `#[path = "..."]`.
+function moduleFiles(root) {
+  const out = [{ file: root, path: '' }];
+  const walk = (file, dir, path) => {
+    const stack = [{ indent: -1, dir, path }];
+    let pathAttr = null;
+    for (const text of readFileSync(join(REPO, file), 'utf8').split('\n')) {
+      if (stack.length > 1 && text === `${' '.repeat(stack.at(-1).indent)}}`) {
+        stack.pop();
+        continue;
+      }
+      const attr = /^\s*#\[path = "([^"]+)"\]$/.exec(text);
+      if (attr) pathAttr = attr[1];
+      if (/^\s*(#\[|\/\/)/.test(text)) continue;
+      const m = /^(\s*)(?:pub(?:\([^)]*\))? )?mod (\w+)(;| \{)$/.exec(text);
+      if (m) {
+        const cur = stack.at(-1);
+        if (m[3] === ' {') stack.push({ indent: m[1].length, dir: join(cur.dir, m[2]), path: `${cur.path}${m[2]}::` });
+        else {
+          const child = pathAttr ? join(cur.dir, pathAttr) : [join(cur.dir, `${m[2]}.rs`), join(cur.dir, m[2], 'mod.rs')].find((f) => existsSync(join(REPO, f)));
+          assert.ok(child && existsSync(join(REPO, child)), `${file}: mod ${m[2]}: no file`);
+          out.push({ file: child, path: `${cur.path}${m[2]}::` });
+          walk(child, child.endsWith('/mod.rs') ? dirname(child) : child.slice(0, -'.rs'.length), `${cur.path}${m[2]}::`);
+        }
+      }
+      pathAttr = null;
+    }
+  };
+  walk(root, dirname(root), '');
+  return out;
+}
+
+// The selections' targets: binary ID and crate root.
+const TARGETS = [
+  ['skyoauth-service::local_transport', 'service/tests/local_transport.rs'],
+  ['skyoauth-operator::operator', 'operator/tests/operator.rs'],
+  ['skyoauth-scenarios::pg', 'tests/pg.rs'],
+];
+// The files whose notices are checked: a selection's own modules, and of
+// its target the crate root and the helper modules (`common`, `support`,
+// `harness::*`), each with `selected` when it is in the selection.
+const SCANNED = TARGETS.flatMap(([bin, root]) => {
+  const prefix = SELECTIONS.find(([b]) => b === bin)[1];
+  return moduleFiles(root)
+    .map((m) => ({ bin, ...m, selected: m.path.startsWith(prefix) || (m.path === '' && prefix === '') }))
+    .filter((m) => m.selected || m.path === '' || /^(common|support|harness)::/.test(m.path));
+});
+
+// Every notice of SCANNED: { file, line, text, bin, path, selected, fn,
+// test }, the text as printed (continuations joined, `{NAME}` replaced by
+// that constant's value, other placeholders by X), and the function around
+// it, if it is still open there (no `}` at its indentation in between),
+// and whether that function is a test.
+function sourceNotices() {
+  const out = [];
+  for (const { bin, file, path, selected } of SCANNED) {
+    const source = readFileSync(join(REPO, file), 'utf8');
+    const lines = source.split('\n');
+    const consts = Object.fromEntries([...source.matchAll(/^const (\w+): (?:&str = "([^"]*)"|\w+ = (\d+));$/gm)].map((m) => [m[1], m[2] ?? m[3]]));
+    for (const { text: raw, line } of stringLiterals(source)) {
+      if (!raw.includes('NOTICE:')) continue;
+      const text = raw.replace(/\\\n\s*/g, '').replace(/\\"/g, '"').replace(/\{(\w*)[^}]*\}/g, (_, name) => consts[name] ?? 'X');
+      let fn;
+      let test = false;
+      for (let k = line - 1; k >= 0; k--) {
+        const m = /^(\s*)(?:pub(?:\([^)]*\))? )?(?:async )?fn (\w+)/.exec(lines[k]);
+        if (!m) continue;
+        if (lines.slice(k + 1, line - 1).some((l) => l === `${m[1]}}`)) break;
+        fn = m[2];
+        for (let a = k - 1; a >= 0 && /^\s*(#\[|\/\/)/.test(lines[a]); a--) if (/^\s*#\[(tokio::)?test\b/.test(lines[a])) test = true;
+        break;
+      }
+      out.push({ file, line, text, bin, path, selected, fn, test });
+    }
+  }
+  return out;
+}
 
 describe('summarize', () => {
   test('no notices and every test passed: passes, and the summary says so', () => {
@@ -116,7 +278,7 @@ describe('summarize', () => {
     assert.equal(
       r.summary,
       `# earlier step\n${HEADING}\n\n` +
-        `- nextest: ${SUMMARY} (the listing selects 5 tests and leaves out 3 of the same binaries)\n` +
+        `- nextest: ${SUMMARY} (the listing selects ${N} tests and leaves out 3 of the same binaries)\n` +
         COUNTS +
         '- User namespaces for the runner user (not root; `unshare --user --map-root-user --mount true`): allowed (exit 0)\n' +
         '- Every selected test ran as root and passed, and none printed a notice: each root-only check of the `local_transport` integration target, of operator `local_path` and of `harness::socket_path_fixture` ran.\n',
@@ -204,8 +366,10 @@ describe('summarize', () => {
     const r = summarize(log(evil));
     assert.equal(r.status, 0, r.stdout);
     assert.deepEqual(annotations(r), ['::warning::NOTICE: x %250A::error::injected %2525 50%25 %0D::error::cr']);
-    // That annotation is the only workflow command on stdout.
-    assert.deepEqual(commands(r.stdout), annotations(r));
+    // That annotation and the counts' notice are the only workflow
+    // commands on stdout.
+    assert.deepEqual(commands(r.stdout), ownCommands(r));
+    assert.equal(ownCommands(r).length, 2);
     assert.ok(!r.stdout.includes('\r'));
   });
 
@@ -213,7 +377,7 @@ describe('summarize', () => {
     const r = summarize(withSummary('Summary [   1.000s] 5 tests run: 4 passed %0A::error::injected 50% \r::warning::cr'));
     assert.equal(r.status, 1);
     assert.deepEqual(annotations(r), ['::error::not every root-only test ran and passed: Summary [   1.000s] 5 tests run: 4 passed %250A::error::injected 50%25 %0D::warning::cr']);
-    assert.deepEqual(commands(r.stdout), annotations(r));
+    assert.deepEqual(commands(r.stdout), ownCommands(r));
   });
 
   // The section `summarize` appends to GITHUB_STEP_SUMMARY is printed to
@@ -221,7 +385,8 @@ describe('summarize', () => {
   const expectedStdout = (r) => {
     const section = appended(r);
     assert.ok(section.endsWith('\n'), section);
-    return [...annotations(r), SECTION_START, ...section.slice(0, -1).split('\n').map((l) => `| ${l}`), SECTION_END, ''].join('\n');
+    assert.equal(countNotices(r).length, 1, r.stdout);
+    return [...annotations(r), SECTION_START, ...section.slice(0, -1).split('\n').map((l) => `| ${l}`), SECTION_END, ...countNotices(r), ''].join('\n');
   };
   const PEER_FIXTURE = () => summarize(log(PEER));
 
@@ -240,13 +405,13 @@ describe('summarize', () => {
       assert.match(appended(r), new RegExp(`^${escapeRe(HEADING)}\n`));
       // Each line of the section is on stdout as `| LINE`, in order.
       const start = r.lines.indexOf(SECTION_START);
-      assert.deepEqual(r.stdout.split('\n').slice(start + 1, -2), appended(r).split('\n').slice(0, -1).map((l) => `| ${l}`));
+      assert.deepEqual(r.stdout.split('\n').slice(start + 1, -3), appended(r).split('\n').slice(0, -1).map((l) => `| ${l}`));
       assert.equal(r.stderr, '');
     }
     // The passing run: its counts are in the step log.
     const pass = cases[0][0];
     for (const line of COUNTS.split('\n').filter(Boolean)) assert.ok(pass.lines.includes(`| ${line}`), line);
-    assert.ok(pass.lines.includes(`| - nextest: ${SUMMARY} (the listing selects 5 tests and leaves out 3 of the same binaries)`));
+    assert.ok(pass.lines.includes(`| - nextest: ${SUMMARY} (the listing selects ${N} tests and leaves out 3 of the same binaries)`));
   });
 
   test('no line of the section on stdout is a workflow command, whatever a notice, a test name or the summary line holds', () => {
@@ -267,7 +432,7 @@ describe('summarize', () => {
     const names = ['skyoauth-scenarios::pg ::error::name', 'skyoauth-scenarios::pg ##[error]name', 'skyoauth-scenarios::pg x\r::error::name'];
     const runs = [
       summarize(log(...notices)),
-      summarize(`${START}${passLines([...SELECTED, ...names])}${notices.join('\n')}\n     Summary [   1.000s] 8 tests run: 8 passed, 3 skipped\n`, '0', '0', listing([...SELECTED, ...names])),
+      summarize(`${START}${passLines([...SELECTED, ...names])}${notices.join('\n')}\n     Summary [   1.000s] ${N + names.length} tests run: ${N + names.length} passed, 3 skipped\n`, '0', '0', listing([...SELECTED, ...names])),
       summarize(log(), '0', '0', `::error::listing\n  ::set-output name=g::h\n##[error]listing\n${LISTING}`),
       summarize(withSummary('Summary [   1.000s] 5 tests run: 4 passed ::error::s \r::set-output name=i::j ##[error]k')),
     ];
@@ -275,17 +440,19 @@ describe('summarize', () => {
       // The section went to GITHUB_STEP_SUMMARY unchanged ...
       assert.ok(appended(r).includes('::error::'), appended(r));
       // ... and the only workflow commands on stdout are the script's own
-      // annotations, all before the section.
+      // annotations, all before the section, and the counts' notice after it.
       const own = annotations(r);
       assert.ok(own.length > 0, r.stdout);
-      assert.deepEqual(commands(r.stdout), own);
+      assert.deepEqual(commands(r.stdout), ownCommands(r));
+      assert.deepEqual(ownCommands(r), [...own, ...countNotices(r)]);
       assert.ok(own.every((l) => l.startsWith('::error::') || l.startsWith('::warning::')), own.join('\n'));
       assert.ok(own.every((l) => !l.includes('\r')), own.join('\n'));
       const start = r.lines.indexOf(SECTION_START);
       assert.ok(start >= own.length, r.stdout);
       assert.deepEqual(r.lines.slice(0, own.length), own);
-      const section = r.lines.slice(start + 1, -1);
-      assert.equal(r.lines.at(-1), SECTION_END);
+      const section = r.lines.slice(start + 1, -2);
+      assert.equal(r.lines.at(-2), SECTION_END);
+      assert.match(r.lines.at(-1), /^::notice::/);
       assert.ok(section.length > 0);
       assert.ok(section.every((l) => l.startsWith('| ') && !l.includes('\r') && !l.includes('##[')), section.join('\n'));
       // Line by line, the summary's section with CR shown as `^M` and `##[`
@@ -296,6 +463,49 @@ describe('summarize', () => {
     assert.ok(runs[0].lines.includes('| - NOTICE: ::error::x'));
     assert.ok(runs[0].lines.includes('| - NOTICE: a ^M::error::after a CR'));
     assert.ok(runs[0].lines.includes('| - NOTICE: old # #[error]syntax # #[set-output name=e;]f'));
+  });
+
+  // The counts as one `::notice::` on the check run: numbers, and the
+  // names of SELECTIONS, only.
+  const NOTICE_SHAPE = new RegExp(
+    '^::notice::Root-only tests: nextest ran (\\d+|\\?) \\(all passed: (yes|no)\\) and skipped \\d+; ' +
+      'the listing selects (\\d+|\\?) and leaves out (\\d+|\\?); passed per selection: ' +
+      `(${SELECTIONS.map(([bin, prefix]) => escapeRe(`${bin}${prefix ? ` ${prefix}*` : ''}`) + ' \\d+/\\d+').join(', ')}|\\?); ` +
+      `required root-only tests that ran and passed: (\\d+|\\?) of ${REQUIRED.length}$`,
+  );
+
+  test('the counts are one notice annotation, after the section', () => {
+    const r = summarize(log());
+    assert.equal(r.status, 0, r.stdout);
+    assert.deepEqual(countNotices(r), [
+      `::notice::Root-only tests: nextest ran ${N} (all passed: yes) and skipped 3; the listing selects ${N} and leaves out 3; passed per selection: ` +
+        `skyoauth-service::local_transport ${LT}/${LT}, skyoauth-operator::operator local_path::* ${OP}/${OP}, skyoauth-scenarios::pg harness::socket_path_fixture::* ${PG}/${PG}; ` +
+        `required root-only tests that ran and passed: ${REQUIRED.length} of ${REQUIRED.length}`,
+    ]);
+    assert.equal(r.lines.at(-1), countNotices(r)[0]);
+    // On a failure too, with what is known.
+    for (const failed of [summarize(log(PEER)), summarize(null, '1', '101', null, '101'), summarize(withSummary('Summary [   1.000s] 5 tests run: 4 passed, 1 failed, 3 skipped'))]) {
+      assert.equal(failed.status, 1);
+      assert.equal(countNotices(failed).length, 1, failed.stdout);
+      assert.match(countNotices(failed)[0], NOTICE_SHAPE);
+    }
+    assert.match(countNotices(summarize(null, '1', '101', null, '101'))[0], /nextest ran \? \(all passed: no\) and skipped 0; the listing selects \? and leaves out \?; passed per selection: \?; required .*: \? of /);
+  });
+
+  test('the counts\' notice holds no text of the log or the listing', () => {
+    const attack = ['::error::n', '%0A::error::p', '\r::warning::q', '##[error]r', '::set-output name=s::t'];
+    const names = attack.map((a, i) => `skyoauth-scenarios::pg harness::socket_path_fixture::x${i}${a.replace(/[\s]/g, '')}`);
+    for (const r of [
+      summarize(log(...attack.map((a) => `NOTICE: ${a}`))),
+      summarize(`${START}${passLines([...SELECTED, ...names])}     Summary [   1.000s] ${N + names.length} tests run: ${N + names.length} passed, 3 skipped\n`, '0', '0', listing([...SELECTED, ...names])),
+      summarize(withSummary(`Summary [   1.000s] ${N} tests run: ${N} passed, 3 skipped ${attack.join(' ')}`)),
+      summarize(log(), '0', '0', `${attack.join('\n')}\n${LISTING}`),
+    ]) {
+      const [notice, ...more] = countNotices(r);
+      assert.deepEqual(more, [], r.stdout);
+      assert.match(notice, NOTICE_SHAPE, r.stdout);
+      for (const a of ['::error', '::warning', '##[', 'set-output', '%0A', '%25', 'x0']) assert.ok(!notice.slice('::notice::'.length).includes(a), `${a} in ${notice}`);
+    }
   });
 
   test('printing the section does not change the exit status or the annotations', () => {
@@ -312,7 +522,8 @@ describe('summarize', () => {
       assert.equal(warnings(r).length, warningCount, r.stdout);
       assert.equal(annotations(r).length, errorCount + warningCount, r.stdout);
       assert.equal(r.lines.filter((l) => l === SECTION_START).length, 1, r.stdout);
-      assert.equal(r.lines.at(-1), SECTION_END, r.stdout);
+      assert.equal(r.lines.at(-2), SECTION_END, r.stdout);
+      assert.equal(countNotices(r).length, 1, r.stdout);
     }
     // A usage error prints no section.
     const usage = summarize(log(), 'x');
@@ -373,9 +584,10 @@ describe('summarize', () => {
       assert.equal(r.status, 1, String(text));
       assert.match(errors(r)[0], /^::error::the root run left no output in /);
       assert.deepEqual(errors(r).slice(1), [
-        '::error::`skyoauth-service::local_transport`: 0 of its 2 selected tests passed',
-        '::error::`skyoauth-operator::operator` `local_path::*`: 0 of its 2 selected tests passed',
-        '::error::`skyoauth-scenarios::pg` `harness::socket_path_fixture::*`: 0 of its 1 selected tests passed',
+        `::error::\`skyoauth-service::local_transport\`: 0 of its ${LT} selected tests passed`,
+        `::error::\`skyoauth-operator::operator\` \`local_path::*\`: 0 of its ${OP} selected tests passed`,
+        `::error::\`skyoauth-scenarios::pg\` \`harness::socket_path_fixture::*\`: 0 of its ${PG} selected tests passed`,
+        ...REQUIRED.map((t) => requiredError(t, 'no PASS line')),
       ]);
       assert.match(r.summary, /^- \*\*Failed:\*\* the root run left no output/m);
     }
@@ -409,13 +621,13 @@ describe('summarize', () => {
   // the number it selects.
   test('the run and skipped counts must be exactly the listing\'s selected and left-out tests', () => {
     for (const [line, selected, leftOut] of [
-      ['Summary [   1.000s] 5 tests run: 5 passed, 4 skipped', SELECTED, LEFT_OUT],
-      ['Summary [   1.000s] 5 tests run: 5 passed, 2 skipped', SELECTED, LEFT_OUT],
-      ['Summary [   1.000s] 5 tests run: 5 passed', SELECTED, LEFT_OUT],
-      ['Summary [   1.000s] 5 tests run: 5 passed, 0 skipped', SELECTED, LEFT_OUT],
-      ['Summary [   1.000s] 5 tests run: 5 passed, 3 skipped', SELECTED, []],
-      ['Summary [   1.000s] 6 tests run: 6 passed, 3 skipped', SELECTED, LEFT_OUT],
-      ['Summary [   1.000s] 4 tests run: 4 passed, 3 skipped', SELECTED, LEFT_OUT],
+      [`Summary [   1.000s] ${N} tests run: ${N} passed, 4 skipped`, SELECTED, LEFT_OUT],
+      [`Summary [   1.000s] ${N} tests run: ${N} passed, 2 skipped`, SELECTED, LEFT_OUT],
+      [`Summary [   1.000s] ${N} tests run: ${N} passed`, SELECTED, LEFT_OUT],
+      [`Summary [   1.000s] ${N} tests run: ${N} passed, 0 skipped`, SELECTED, LEFT_OUT],
+      [`Summary [   1.000s] ${N} tests run: ${N} passed, 3 skipped`, SELECTED, []],
+      [`Summary [   1.000s] ${N + 1} tests run: ${N + 1} passed, 3 skipped`, SELECTED, LEFT_OUT],
+      [`Summary [   1.000s] ${N - 1} tests run: ${N - 1} passed, 3 skipped`, SELECTED, LEFT_OUT],
     ]) {
       const r = summarize(withSummary(line), '0', '0', listing(selected, leftOut));
       assert.equal(r.status, 1, line);
@@ -425,22 +637,22 @@ describe('summarize', () => {
       assert.doesNotMatch(r.summary, COMPLETE);
     }
     // No test left out and none skipped, with or without the count.
-    for (const line of ['Summary [   0.100s] 5 tests run: 5 passed, 0 skipped', 'Summary [   0.100s] 5 tests run: 5 passed']) {
+    for (const line of [`Summary [   0.100s] ${N} tests run: ${N} passed, 0 skipped`, `Summary [   0.100s] ${N} tests run: ${N} passed`]) {
       const r = summarize(withSummary(line), '0', '0', listing(SELECTED, []));
       assert.equal(r.status, 0, line + r.stdout);
-      assert.match(r.summary, /the listing selects 5 tests and leaves out 0 of the same binaries/);
+      assert.match(r.summary, new RegExp(`the listing selects ${N} tests and leaves out 0 of the same binaries`));
     }
   });
 
   test('only the listing\'s ` (skipped)` mark leaves a test out, not the word in its name', () => {
     const selected = [...SELECTED, 'skyoauth-service::local_transport a_bind_is_never_skipped'];
-    const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] 6 tests run: 6 passed, 3 skipped\n`, '0', '0', listing(selected));
+    const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${N + 1} tests run: ${N + 1} passed, 3 skipped\n`, '0', '0', listing(selected));
     assert.equal(r.status, 0, r.stdout);
-    assert.match(r.summary, /^- `skyoauth-service::local_transport`: 3 of 3 selected tests ran and passed$/m);
+    assert.match(r.summary, new RegExp(`^- \`skyoauth-service::local_transport\`: ${LT + 1} of ${LT + 1} selected tests ran and passed$`, 'm'));
   });
 
   test('the last summary line counts; a slow test passes', () => {
-    for (const line of [SUMMARY, `Summary [ 120.000s] 5 tests run: 5 passed (2 slow), 3 skipped`]) {
+    for (const line of [SUMMARY, `Summary [ 120.000s] ${N} tests run: ${N} passed (2 slow), 3 skipped`]) {
       const r = summarize(`${START}${passLines()}     Summary [   0.1s] 2 tests run: 1 passed, 1 failed\n     ${line}\n`);
       assert.equal(r.status, 0, line + r.stdout);
       assert.match(r.summary, new RegExp(`^- nextest: ${escapeRe(line)} \\(the listing`, 'm'));
@@ -456,21 +668,25 @@ describe('summarize', () => {
       const selected = SELECTED.filter((t) => !t.startsWith(gone));
       const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, 3 skipped\n`, '0', '0', listing(selected));
       assert.equal(r.status, 1, gone);
-      assert.deepEqual(errors(r), [`::error::the listing selects no test of ${name}`]);
+      // That selection's required tests are not listed either.
+      assert.deepEqual(errors(r), [`::error::the listing selects no test of ${name}`, ...REQUIRED.filter((t) => t.startsWith(gone)).map((t) => requiredError(t, 'not listed'))]);
       assert.match(r.summary, new RegExp(`^- ${escapeRe(name)}: 0 of 0 selected tests ran and passed$`, 'm'));
       assert.doesNotMatch(r.summary, COMPLETE);
     }
   });
 
   test('a selected test without a PASS line fails its selection, even when the counts agree', () => {
-    const missing = SELECTED[1];
+    // A test no check requires by name, so its selection's count is the
+    // only error.
+    const missing = EXTRA[0];
+    assert.match(missing, /^skyoauth-operator::operator local_path::/);
     const text = `${START}${passLines(SELECTED.filter((t) => t !== missing))}        PASS [   0.004s] ( 9/5) skyoauth-operator::operator local_path::another_test\n${PASSED}`;
     const r = summarize(text);
     assert.equal(r.status, 1);
-    assert.deepEqual(errors(r), ['::error::`skyoauth-operator::operator` `local_path::*`: 1 of its 2 selected tests passed']);
+    assert.deepEqual(errors(r), [`::error::\`skyoauth-operator::operator\` \`local_path::*\`: ${OP - 1} of its ${OP} selected tests passed`]);
     // A FAIL line is no PASS line.
-    const failed = summarize(`${START}${passLines(SELECTED.slice(1))}        FAIL [   0.004s] ( 1/5) ${SELECTED[0]}\n${PASSED}`);
-    assert.deepEqual(errors(failed), ['::error::`skyoauth-operator::operator` `local_path::*`: 1 of its 2 selected tests passed']);
+    const failed = summarize(`${START}${passLines(SELECTED.filter((t) => t !== missing))}        FAIL [   0.004s] ( 1/5) ${missing}\n${PASSED}`);
+    assert.deepEqual(errors(failed), [`::error::\`skyoauth-operator::operator\` \`local_path::*\`: ${OP - 1} of its ${OP} selected tests passed`]);
   });
 
   test('a listing that selects a test outside the three selections fails', () => {
@@ -482,12 +698,12 @@ describe('summarize', () => {
     ];
     for (const t of outside) {
       const selected = [...SELECTED, t];
-      const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] 6 tests run: 6 passed, 3 skipped\n`, '0', '0', listing(selected));
+      const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${N + 1} tests run: ${N + 1} passed, 3 skipped\n`, '0', '0', listing(selected));
       assert.equal(r.status, 1, t);
       assert.deepEqual(errors(r), [`::error::the filterset selects tests outside the three selections: 1 (${t})`]);
     }
     const many = Array.from({ length: 7 }, (_, i) => `skyoauth-scenarios::pg a0${i}_x`);
-    const r = summarize(`${START}${passLines([...SELECTED, ...many])}     Summary [   1.000s] 12 tests run: 12 passed, 3 skipped\n`, '0', '0', listing([...SELECTED, ...many]));
+    const r = summarize(`${START}${passLines([...SELECTED, ...many])}     Summary [   1.000s] ${N + many.length} tests run: ${N + many.length} passed, 3 skipped\n`, '0', '0', listing([...SELECTED, ...many]));
     assert.deepEqual(errors(r), [`::error::the filterset selects tests outside the three selections: 7 (${many.slice(0, 5).join(', ')}, ...)`]);
   });
 
@@ -510,6 +726,7 @@ describe('summarize', () => {
       assert.equal(r.status, 1, dropped);
       assert.deepEqual(errors(r), [
         `::error::the listing marks 1 tests of the selections as skipped (${dropped}): the filterset leaves out tests it should run`,
+        requiredError(dropped, 'listed as skipped'),
         // The dropped test is not an expected exclusion, so nextest's
         // skipped count is one more than the tests the listing leaves out.
         `::error::nextest ran ${selected.length} tests and skipped ${leftOut.length}, but the listing selects ${selected.length} and leaves out ${LEFT_OUT.length}: ${line}`,
@@ -530,7 +747,7 @@ describe('summarize', () => {
     const r = summarize(`${START}${passLines()}     ${line}\n`, '0', '0', listing(SELECTED, leftOut));
     assert.equal(r.status, 0, r.stdout);
     assert.deepEqual(annotations(r), []);
-    assert.match(r.summary, new RegExp(`^- nextest: ${escapeRe(line)} \\(the listing selects 5 tests and leaves out 6 of the same binaries\\)$`, 'm'));
+    assert.match(r.summary, new RegExp(`^- nextest: ${escapeRe(line)} \\(the listing selects ${N} tests and leaves out 6 of the same binaries\\)$`, 'm'));
     assert.match(r.summary, COMPLETE);
   });
 
@@ -548,6 +765,19 @@ describe('summarize', () => {
     const bad = summarize(log(), '0', '0', `    Finished \`test\` profile\n${LISTING}`);
     assert.equal(bad.status, 1);
     assert.deepEqual(errors(bad), ['::error::the listing holds a line that is not `BINARY-ID TEST ...`:     Finished `test` profile']);
+    // A blank line is malformed too, and does not hide a later malformed
+    // line: the valid lines still match the run, so this is the only error.
+    for (const [list, shown] of [
+      [`\n    Finished \`test\` profile\n${LISTING}`, '(blank line)'],
+      [`${LISTING}\n`, '(blank line)'],
+      [`${LISTING.slice(0, LISTING.indexOf('\n') + 1)}  \t\n${LISTING.slice(LISTING.indexOf('\n') + 1)}`, '(blank line)'],
+      [`${LISTING}%0A::error::x 50%\n`, '%250A::error::x 50%25'],
+    ]) {
+      const r = summarize(log(), '0', '0', list);
+      assert.equal(r.status, 1, JSON.stringify(list.slice(0, 40)));
+      assert.deepEqual(errors(r), [`::error::the listing holds a line that is not \`BINARY-ID TEST ...\`: ${shown}`]);
+      assert.doesNotMatch(r.summary, COMPLETE);
+    }
   });
 
   test('every failure is reported, not only the first', () => {
@@ -559,36 +789,88 @@ describe('summarize', () => {
   // Every NOTICE the three selections' sources print, through `summarize`:
   // each is one of the two kinds the script's comment lists, so that a
   // notice added or reworded there is classified here before it can pass
-  // as a warning where it should fail the step (or the reverse).
+  // as a warning where it should fail the step (or the reverse). The
+  // sources are every file the selections' modules are in, and the files
+  // of their targets' helper modules and crate roots (SCANNED).
   test('each NOTICE of the selections\' sources fails or warns as the script documents', () => {
-    const KINDS = [
-      ['SKYOAUTH_IT_PEER_USER is not set', 'fails'],
-      ['socket path cases were NOT run: they need root', 'fails'],
-      ['socket path cases were NOT bound by the service', 'fails'],
-      ['the owner check needs root: it was NOT tried', 'fails'],
-      ['no socket path case was bound by the service: it binds on Linux', 'fails'],
-      ['this kernel follows at most', 'warns'],
-      ["is not root's, sticky and writable by all: the shared directory was NOT tried in it", 'warns'],
-      ['the working directory is too long for a relative socket path', 'warns'],
-      ['/proc/self/fd is missing', 'warns'],
-      ['a bind without /proc was NOT tested', 'warns'],
-      ['a user namespace was denied', 'warns'],
-    ];
-    const notices = [];
-    for (const file of ['service/tests/local_transport.rs', 'operator/tests/local_path/mod.rs', 'tests/harness/socket_path_fixture.rs']) {
-      const source = readFileSync(join(REPO, file), 'utf8');
-      const consts = Object.fromEntries([...source.matchAll(/^const (\w+): (?:&str = "([^"]*)"|\w+ = (\d+));$/gm)].map((m) => [m[1], m[2] ?? m[3]]));
-      const found = [...source.matchAll(/"(NOTICE:(?:[^"\\]|\\.)*)"/gs)].map((m) => m[1].replace(/\\\n\s*/g, '').replace(/\{(\w*)[^}]*\}/g, (_, name) => consts[name] ?? 'X'));
-      assert.ok(found.length > 0, `${file}: no NOTICE`);
-      notices.push(...found.map((n) => [file, n]));
+    const notices = sourceNotices();
+    for (const [pattern] of KINDS) assert.ok(notices.some((n) => n.text.includes(pattern)), `no source prints a notice with ${JSON.stringify(pattern)}`);
+    for (const { file, line, text } of notices) {
+      const kinds = KINDS.filter(([pattern]) => text.includes(pattern));
+      assert.equal(kinds.length, 1, `${file}:${line}: ${text}: not classified (or twice); add it to the script's comment and here`);
+      const r = summarize(log(text));
+      assert.deepEqual(warnings(r), [`::warning::${text}`], text);
+      assert.equal(r.status, kinds[0][1] === 'fails' ? 1 : 0, `${file}:${line}: ${text} ${kinds[0][1]}\n${r.stdout}`);
     }
-    for (const [pattern] of KINDS) assert.ok(notices.some(([, n]) => n.includes(pattern)), `no source prints a notice with ${JSON.stringify(pattern)}`);
-    for (const [file, notice] of notices) {
-      const kinds = KINDS.filter(([pattern]) => notice.includes(pattern));
-      assert.equal(kinds.length, 1, `${file}: ${notice}: not classified (or twice); add it to the script's comment and here`);
-      const r = summarize(log(notice));
-      assert.deepEqual(warnings(r), [`::warning::${notice}`], notice);
-      assert.equal(r.status, kinds[0][1] === 'fails' ? 1 : 0, `${file}: ${notice} ${kinds[0][1]}\n${r.stdout}`);
+  });
+
+  test('the scanned sources are the selections\' modules and their targets\' helpers and crate roots', () => {
+    assert.deepEqual(
+      SCANNED.map(({ bin, file, path }) => `${bin} ${file} ${path}`),
+      [
+        'skyoauth-service::local_transport service/tests/local_transport.rs ',
+        'skyoauth-service::local_transport service/tests/common/mod.rs common::',
+        'skyoauth-operator::operator operator/tests/operator.rs ',
+        'skyoauth-operator::operator operator/tests/local_path/mod.rs local_path::',
+        'skyoauth-operator::operator operator/tests/support/mod.rs support::',
+        'skyoauth-scenarios::pg tests/pg.rs ',
+        'skyoauth-scenarios::pg tests/harness/local_transport_wire.rs harness::local_transport_wire::',
+        'skyoauth-scenarios::pg tests/harness/pg_teardown.rs harness::pg_teardown::',
+        'skyoauth-scenarios::pg tests/harness/public_identity_fixture.rs harness::public_identity_fixture::',
+        'skyoauth-scenarios::pg tests/harness/recovery_challenge_fixture.rs harness::recovery_challenge_fixture::',
+        'skyoauth-scenarios::pg tests/harness/recovery_key_fixture.rs harness::recovery_key_fixture::',
+        'skyoauth-scenarios::pg tests/harness/recovery_signature_fixture.rs harness::recovery_signature_fixture::',
+        'skyoauth-scenarios::pg tests/harness/socket_path_fixture.rs harness::socket_path_fixture::',
+        'skyoauth-scenarios::pg tests/harness/wire_errors.rs harness::wire_errors::',
+        'skyoauth-scenarios::pg tests/harness/wire_fixture_keys.rs harness::wire_fixture_keys::',
+      ],
+    );
+    // A notice anywhere in a literal is found, and none in a comment.
+    const found = stringLiterals('// "NOTICE: in a comment"\n/* "NOTICE: x" */ let c = \'"\'; let s = "a NOTICE: b \\" c"; let r = r#"NOTICE: raw "q""#;\n');
+    assert.deepEqual(found.filter((l) => l.text.includes('NOTICE:')).map((l) => l.text), ['a NOTICE: b \\" c', 'NOTICE: raw "q"']);
+  });
+
+  // REQUIRED, the tests that must run and pass by name, is the set of
+  // tests around the notices that fail the step or say they need root, so
+  // that a notice added, moved or renamed with its test fails here until
+  // the script's list follows.
+  test('REQUIRED is the tests around each notice that fails the step or says it needs root', () => {
+    const required = new Set();
+    for (const n of sourceNotices()) {
+      const kind = KINDS.find(([pattern]) => n.text.includes(pattern))?.[1];
+      if (kind !== 'fails' && !/\bneeds? root\b/.test(n.text)) continue;
+      assert.ok(n.selected, `${n.file}:${n.line}: a notice that fails the step outside the selections' modules (${n.text}): map it to its tests in REQUIRED by hand`);
+      assert.ok(n.test, `${n.file}:${n.line}: the notice is in \`fn ${n.fn ?? '?'}\`, not in a test: map it to its tests in REQUIRED by hand`);
+      required.add(`${n.bin} ${n.path}${n.fn}`);
+    }
+    assert.deepEqual(REQUIRED, [...required].sort());
+    for (const t of REQUIRED) {
+      const [bin, name] = t.split(' ');
+      assert.ok(SELECTIONS.some(([b, prefix]) => b === bin && name.startsWith(prefix)), `${t} is in no selection`);
+    }
+  });
+
+  test('a required test that is not listed and did not run fails, by name, though every count agrees', () => {
+    for (const gone of REQUIRED) {
+      const selected = SELECTED.filter((t) => t !== gone);
+      const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, ${LEFT_OUT.length} skipped\n`, '0', '0', listing(selected));
+      assert.equal(r.status, 1, gone);
+      assert.deepEqual(errors(r), [requiredError(gone, 'not listed')]);
+      assert.match(r.summary, new RegExp(`^- \\*\\*Failed:\\*\\* required root-only test ${escapeRe(gone)} did not run: not listed$`, 'm'));
+      assert.match(r.summary, new RegExp(`^- Required root-only tests .*: ${REQUIRED.length - 1} of ${REQUIRED.length} ran and passed$`, 'm'));
+      assert.doesNotMatch(r.summary, COMPLETE);
+    }
+  });
+
+  test('a required test listed as skipped, or listed without a PASS line, fails by name', () => {
+    for (const gone of REQUIRED) {
+      const selected = SELECTED.filter((t) => t !== gone);
+      const skipped = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, ${LEFT_OUT.length + 1} skipped\n`, '0', '0', listing(selected, [...LEFT_OUT, gone]));
+      assert.equal(skipped.status, 1, gone);
+      assert.ok(errors(skipped).includes(requiredError(gone, 'listed as skipped')), skipped.stdout);
+      const noPass = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${N} tests run: ${N} passed, ${LEFT_OUT.length} skipped\n`);
+      assert.equal(noPass.status, 1, gone);
+      assert.ok(errors(noPass).includes(requiredError(gone, 'no PASS line')), noPass.stdout);
     }
   });
 
@@ -888,11 +1170,6 @@ const upload = (step) => {
   return { name, paths, if: /^ {8}if: (.+)$/m.exec(step)?.[1] };
 };
 
-// The script's SELECTIONS, as [binary ID, test name prefix] pairs.
-const SELECTIONS = /^SELECTIONS='([^']*)'$/m
-  .exec(readFileSync(SCRIPT, 'utf8'))[1]
-  .split('\n')
-  .map((l) => [l.split(' ')[0], l.split(' ')[1] ?? '']);
 // The step's `selection=(...)` array: its flags before `-E`, and the
 // filterset after it (one single-quoted word).
 const selectionOf = (run) => {
@@ -934,6 +1211,17 @@ const problems = (ci) => {
   if (!/^ {10}set -euo pipefail$/m.test(run)) out.push('the root step does not set -euo pipefail');
   if (!/^ {10}sh scripts\/ci\/root-transport-run\.sh run "\$log" \\$/m.test(run)) out.push('the root step does not run the tests through root-transport-run.sh run');
   if (!/^ {10}sh scripts\/ci\/root-transport-run\.sh summarize "\$log" "\$userns" "\$status" "\$list" "\$listed" \|\| status=\$\?$/m.test(run)) out.push('the root step does not call root-transport-run.sh summarize with the run\'s status and the listing');
+  // The step's exit is the run's, the listing's (through summarize) and
+  // summarize's: its last line, and nothing lets the job pass without it.
+  // The `run: |` block alone: its lines indented under it (what follows
+  // in this text is the next step's comment).
+  const block = /^ {8}run: \|\n((?:(?: {10}.*)?\n)*)/m.exec(root)?.[1].trimEnd() ?? '';
+  if (!block.endsWith('\n          exit "$status"')) out.push('the root step does not end with exit "$status"');
+  if (/^\s*continue-on-error:/m.test(job)) out.push('the service-nextest job or one of its steps has continue-on-error');
+  const gate = jobOf(ci, 'ci-passed');
+  const needs = /^ {4}needs:\n((?: {6}- .*\n)+)/m.exec(gate)?.[1].split('\n').map((l) => l.trim().replace(/^- /, '')).filter(Boolean) ?? [];
+  if (!needs.includes('service-nextest')) out.push('ci-passed does not need service-nextest');
+  if (!/^ {4}if: always\(\)$/m.test(gate) || !/RESULTS: \$\{\{ join\(needs\.\*\.result, ' '\) \}\}/.test(gate) || !/success \| skipped\) ;;\n\s*\*\) exit 1 ;;/.test(gate)) out.push('ci-passed does not fail on a needed job that did not succeed');
   if (!/"CARGO_TERM_COLOR=never"/.test(run) || /CARGO_TERM_COLOR=\$/.test(run)) out.push('the root run does not set CARGO_TERM_COLOR=never');
   if (!/^ {12}"\$\{as_root\[@\]\}" cargo nextest run "\$\{selection\[@\]\}" --no-capture \\$/m.test(run)) out.push('the root run is not the selection, as root, with --no-capture');
   const listCall = [
@@ -1012,9 +1300,25 @@ describe('the service-nextest job in ci.yml', () => {
       [(b) => b.replace('list_log="$RUNNER_TEMP/local-transport-root-list.log"', 'list_log="$RUNNER_TEMP/local-transport-root.log"'), /a file of its own/],
       [(b) => b.replace('            || listed=$?\n', '            || status=$?\n'), /listed as root/],
       [(b) => b.replace(/^( {10}sudo chown .*)$/m, '$1\n          "${as_root[@]}" cargo nextest list "${selection[@]}" > /dev/null'), /listed more than once/],
+      // The step's exit.
+      [(b) => b.replace('          exit "$status"\n', '          exit 0\n'), /end with exit "\$status"/],
+      [(b) => b.replace('"$list" "$listed" || status=$?', '"$list" "$listed" || true'), /summarize with the run's status/],
+      [(b) => b.replace('        id: root\n', '        id: root\n        continue-on-error: true\n'), /continue-on-error/],
+      [(b) => b.replace(/^( {4}runs-on: .*)$/m, '$1\n    continue-on-error: true'), /continue-on-error/],
     ];
     for (const [f, re] of cases) {
       const changed = inJob(f);
+      assert.notEqual(changed, CI, `${re}: the mutation did not apply`);
+      assert.match(problems(changed).join('\n'), re);
+    }
+    // The aggregate job.
+    const gate = jobOf(CI, 'ci-passed');
+    for (const [f, re] of [
+      [(b) => b.replace('      - service-nextest\n', ''), /ci-passed does not need service-nextest/],
+      [(b) => b.replace('              *) exit 1 ;;\n', '              *) ;;\n'), /does not fail on a needed job/],
+      [(b) => b.replace('    if: always()\n', ''), /does not fail on a needed job/],
+    ]) {
+      const changed = CI.replace(gate, () => f(gate));
       assert.notEqual(changed, CI, `${re}: the mutation did not apply`);
       assert.match(problems(changed).join('\n'), re);
     }

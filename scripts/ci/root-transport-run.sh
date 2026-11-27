@@ -54,11 +54,16 @@
 #       the number it leaves out (the tests of the same binaries outside
 #       the filterset, which nextest counts as skipped); when a selection's
 #       listed tests do not all have a `PASS` (or `LEAK`) line in the log;
-#       or when a notice holds one of the NOTICE_FAILS strings below; else
+#       when a test of REQUIRED below is not listed, is listed as skipped
+#       or has no `PASS` (or `LEAK`) line (one error each, naming it); or
+#       when a notice holds one of the NOTICE_FAILS strings below; else
 #       0. Only a run with none of these and no notice at all is summarized
 #       as complete, and only for what it ran: the three selections (not,
-#       say, the service library's own root-only tests). Usage errors exit
-#       2.
+#       say, the service library's own root-only tests). Last, it prints
+#       one `::notice::` annotation with the counts (nextest's, the
+#       listing's, each selection's and REQUIRED's), built from numbers and
+#       the names in SELECTIONS only, never from the log, so that they show
+#       on the check run. Usage errors exit 2.
 #
 # The selections: a binary ID and the prefix of the test names selected in
 # it (none: every test). The step's filterset (.github/workflows/ci.yml)
@@ -66,6 +71,23 @@
 SELECTIONS='skyoauth-service::local_transport
 skyoauth-operator::operator local_path::
 skyoauth-scenarios::pg harness::socket_path_fixture::'
+#
+# The tests that must run and pass, each a binary ID and a test name as
+# the listing prints them: the tests whose notice says that root-only
+# cases did not run, so that removing one (deleting it, `#[cfg(any())]`)
+# fails the step although every count would still agree. The self-test
+# derives this list from the selections' sources: the test around each
+# notice that holds a NOTICE_FAILS string or the peer user variable, or
+# that says it needs root.
+REQUIRED='skyoauth-operator::operator local_path::socket_path_cases_match_check_socket
+skyoauth-operator::operator local_path::the_socket_must_be_the_expected_owners
+skyoauth-scenarios::pg harness::socket_path_fixture::socket_path_fixture_cases_match_the_services_bind
+skyoauth-service::local_transport a_directory_the_service_uid_cannot_list_takes_a_socket
+skyoauth-service::local_transport a_peer_of_another_uid_is_refused
+skyoauth-service::local_transport a_process_that_is_not_root_binds_as_its_own_uid_only
+skyoauth-service::local_transport the_owner_of_a_directory_above_cannot_redirect_a_bind
+skyoauth-service::local_transport the_service_uid_cannot_redirect_a_bind
+skyoauth-service::local_transport without_proc_only_a_short_path_of_the_own_uid_binds'
 #
 # The notices that fail the step: the step runs as root with
 # SKYOAUTH_IT_PEER_USER set, on Linux on x86_64 (ubuntu-24.04), so each
@@ -223,6 +245,8 @@ summarize() {
     }
 
     : > "$tmp/notices"
+    per=
+    required_count=$(printf '%s\n' "$REQUIRED" | wc -l | tr -d ' ')
     : > "$tmp/passed"
     : > "$tmp/selections"
     line=
@@ -265,13 +289,16 @@ summarize() {
     # listing line that is not a test, for a selected test outside
     # SELECTIONS and for a test of SELECTIONS marked skipped (not counted
     # in `excluded`: only the tests outside SELECTIONS are left out as
-    # expected).
+    # expected), and `required|BINARY-ID TEST|REASON` for each test of
+    # REQUIRED that did not run, `requiredok|N` for those that did.
     selected=
+    required_ok=
     if [ ! -s "$list" ]; then
         fail "the listing of the root run's selection is missing or empty ($list)"
     else
         printf '%s\n' "$SELECTIONS" > "$tmp/selections"
-        awk -v selections="$tmp/selections" -v passed="$tmp/passed" '
+        printf '%s\n' "$REQUIRED" > "$tmp/required"
+        awk -v selections="$tmp/selections" -v passed="$tmp/passed" -v required="$tmp/required" '
             BEGIN {
                 while ((getline entry < selections) > 0) {
                     n++
@@ -280,6 +307,7 @@ summarize() {
                     prefix[n] = (index(entry, " ") ? substr(entry, index(entry, " ") + 1) : "")
                 }
                 while ((getline entry < passed) > 0) pass[entry] = 1
+                while ((getline entry < required) > 0) req[++nreq] = entry
             }
             function which(b, t, i) {
                 for (i = 1; i <= n; i++)
@@ -288,12 +316,14 @@ summarize() {
             }
             $0 !~ /^[A-Za-z0-9_-]+::[A-Za-z0-9_-]+ [^ ]/ { print "bad|" $0; next }
             $NF == "(skipped)" {
+                skippedtest[$1 " " $2] = 1
                 if (which($1, $2)) print "skippedmatch|" $1 " " $2
                 else excluded++
                 next
             }
             {
                 all++
+                listedtest[$1 " " $2] = 1
                 i = which($1, $2)
                 if (!i) { print "outside|" $1 " " $2; next }
                 listed[i]++
@@ -303,8 +333,19 @@ summarize() {
                 print "selected|" all + 0
                 print "excluded|" excluded + 0
                 for (i = 1; i <= n; i++) print "selection|" bin[i] "|" prefix[i] "|" listed[i] + 0 "|" ok[i] + 0
+                for (i = 1; i <= nreq; i++) {
+                    t = req[i]
+                    if (t in skippedtest) print "required|" t "|listed as skipped"
+                    else if (!(t in listedtest)) print "required|" t "|not listed"
+                    else if (!(t in pass)) print "required|" t "|no PASS line"
+                    else good++
+                }
+                print "requiredok|" good + 0
             }' "$list" > "$tmp/listing"
-        bad=$(awk '/^bad\|/ { print substr($0, 5); exit }' "$tmp/listing")
+        # The first malformed line, `(blank line)` for one that is empty or
+        # white space only, so that any malformed line gives a non-empty
+        # value whatever its text (`fail` escapes it in the annotation).
+        bad=$(awk '/^bad\|/ { line = substr($0, 5); print (line ~ /^[ \t\r]*$/ ? "(blank line)" : line); exit }' "$tmp/listing")
         if [ -n "$bad" ]; then
             fail "the listing holds a line that is not \`BINARY-ID TEST ...\`: $bad"
         fi
@@ -318,6 +359,7 @@ summarize() {
         fi
         selected=$(sed -n 's/^selected|//p' "$tmp/listing")
         excluded=$(sed -n 's/^excluded|//p' "$tmp/listing")
+        required_ok=$(sed -n 's/^requiredok|//p' "$tmp/listing")
         while IFS='|' read -r kind bin prefix count ok; do
             [ "$kind" = selection ] || continue
             name="\`$bin\`${prefix:+ \`$prefix*\`}"
@@ -327,7 +369,15 @@ summarize() {
                 fail "$name: $ok of its $count selected tests passed"
             fi
             printf -- '- %s: %s of %s selected tests ran and passed\n' "$name" "$ok" "$count" >> "$tmp/counts"
+            per="${per:+$per, }$bin${prefix:+ $prefix*} $ok/$count"
         done < "$tmp/listing"
+        # The name and the reason are the script's own (REQUIRED, and the
+        # three reasons above), never the listing's text.
+        while IFS='|' read -r kind test why; do
+            [ "$kind" = required ] || continue
+            fail "required root-only test $test did not run: $why"
+        done < "$tmp/listing"
+        printf -- '- Required root-only tests (REQUIRED in scripts/ci/root-transport-run.sh): %s of %s ran and passed\n' "$required_ok" "$required_count" >> "$tmp/counts"
         if [ -n "$run" ] && { [ "$run" -ne "$selected" ] || [ "$skipped" -ne "$excluded" ]; }; then
             fail "nextest ran $run tests and skipped $skipped, but the listing selects $selected and leaves out $excluded: $line"
         fi
@@ -384,6 +434,10 @@ summarize() {
     echo "Root-only tests summary:"
     awk '{ gsub(/\r/, "^M"); gsub(/##\[/, "# #["); print "| " $0 }' "$tmp/section"
     echo "End of the root-only tests summary."
+    # The counts, as a notice on the check run: numbers, and names from
+    # SELECTIONS, only (`run`, `skipped`, `selected`, `excluded` and
+    # `required_ok` are digits or empty).
+    annotate notice "Root-only tests: nextest ran ${run:-?} (all passed: $([ -n "$run" ] && echo yes || echo no)) and skipped $skipped; the listing selects ${selected:-?} and leaves out ${excluded:-?}; passed per selection: ${per:-?}; required root-only tests that ran and passed: ${required_ok:-?} of $required_count"
     return "$failed"
 }
 
