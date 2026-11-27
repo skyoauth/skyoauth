@@ -18,6 +18,10 @@ pub fn fixtures_dir() -> PathBuf {
     dir
 }
 
+/// The socket path fixture under `_wire/`, read by `local_path` (Unix
+/// only) and listed by `local_wire`.
+pub const SOCKET_PATH_FIXTURE: &str = "socket_path.v1.json";
+
 /// The fixture file `name` under `_recovery/`, parsed.
 pub fn recovery_fixture(name: &str) -> Value {
     let path = fixtures_dir().join("_recovery").join(name);

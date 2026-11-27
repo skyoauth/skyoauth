@@ -733,7 +733,10 @@ impl LocalClient<CheckedSocketPath> {
 #[cfg(test)]
 mod tests {
     use std::{
-        os::unix::{fs::PermissionsExt as _, net::UnixListener},
+        os::unix::{
+            fs::{DirBuilderExt as _, PermissionsExt as _},
+            net::UnixListener,
+        },
         sync::atomic::{AtomicU32, Ordering},
         time::{Duration, Instant},
     };
@@ -752,8 +755,7 @@ mod tests {
                 std::process::id(),
                 COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
-            fs::create_dir(&path).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
             Self(path)
         }
     }

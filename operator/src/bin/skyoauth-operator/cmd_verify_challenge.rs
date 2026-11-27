@@ -1,0 +1,160 @@
+//! `verify-challenge`: checks a challenge artifact against the operator's
+//! values and clock, and prints its plan for the operator to compare.
+
+use std::{
+    fmt::Write as _,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use skyoauth_operator::{
+    local::MAX_REPLY_BYTES,
+    recovery::{Challenge, Expectations, check_challenge},
+};
+
+use crate::{Failure, Outcome, args::VerifyChallenge, artifact, input, show::quoted};
+
+/// The time to check against, and where it came from.
+struct Clock {
+    source: &'static str,
+    now_micros: i64,
+}
+
+/// `--now` when given, else the system clock.
+fn clock(now: Option<i64>) -> Result<Clock, Failure> {
+    if let Some(now_micros) = now {
+        return Ok(Clock {
+            source: "--now",
+            now_micros,
+        });
+    }
+    let unreadable = || {
+        Failure::Io(
+            "the system clock cannot be read as microseconds since the Unix epoch".to_owned(),
+        )
+    };
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| unreadable())?;
+    let now_micros = i64::try_from(since_epoch.as_micros()).map_err(|_| unreadable())?;
+    Ok(Clock {
+        source: "system",
+        now_micros,
+    })
+}
+
+pub fn run(flags: &VerifyChallenge) -> Outcome {
+    let challenge = match input::read_file("--challenge", &flags.challenge, MAX_REPLY_BYTES)
+        .and_then(|bytes| artifact::challenge(&bytes))
+    {
+        Ok(challenge) => challenge,
+        Err(failure) => return failure.into(),
+    };
+    // The clock is read last, just before the check.
+    let clock = match clock(flags.now) {
+        Ok(clock) => clock,
+        Err(failure) => return failure.into(),
+    };
+    let expectations = Expectations {
+        instance_id: &flags.instance_id,
+        now_micros: clock.now_micros,
+        recovery_key_epoch: Some(flags.epoch),
+        replacement_public_identity: flags.replacement_identity.as_deref(),
+        trust_anchor_ref: flags.trust_anchor.as_deref(),
+        new_recovery_public_key: flags.new_recovery_key.as_ref(),
+    };
+    let not_given: Vec<&str> = [
+        (
+            "--replacement-identity",
+            flags.replacement_identity.is_some(),
+        ),
+        ("--trust-anchor", flags.trust_anchor.is_some()),
+        ("--new-recovery-key", flags.new_recovery_key.is_some()),
+    ]
+    .into_iter()
+    .filter(|(_, given)| !given)
+    .map(|(flag, _)| flag)
+    .collect();
+    let mut output = plan(&challenge, &clock, &expectations);
+    let result = match check_challenge(&challenge, &expectations) {
+        Ok(verified) if verified.replacement_confirmed() => {
+            output.push_str("replacement_confirmed: yes\n");
+            output.push_str("result: ok; every check passed, the replacement is confirmed\n");
+            Ok(())
+        }
+        Ok(_) => {
+            let not_given = not_given.join(", ");
+            let _ = writeln!(output, "replacement_confirmed: no (not given: {not_given})");
+            output.push_str(
+                "result: not confirmed; every given check passed, but the replacement is not \
+                 confirmed\n",
+            );
+            Err(Failure::NotConfirmed(format!(
+                "not confirmed: the replacement is not confirmed (not given: {not_given})"
+            )))
+        }
+        Err(refusal) => {
+            let _ = writeln!(output, "result: refused ({refusal:?})");
+            Err(Failure::Refused(format!(
+                "refused ({refusal:?}): {refusal}"
+            )))
+        }
+    };
+    Outcome { output, result }
+}
+
+/// The clock, the challenge's members and plan, and which values were
+/// given to check, one per line. Not all of them were checked when the
+/// challenge is refused: the check stops at the first refusal.
+fn plan(challenge: &Challenge, clock: &Clock, expectations: &Expectations<'_>) -> String {
+    let plan = challenge.plan();
+    let mut given = vec!["instance_id", "expires_at", "recovery_key_epoch"];
+    for (name, is_given) in [
+        (
+            "public_identity",
+            expectations.replacement_public_identity.is_some(),
+        ),
+        ("trust_anchor_ref", expectations.trust_anchor_ref.is_some()),
+        (
+            "new_recovery_public_key",
+            expectations.new_recovery_public_key.is_some(),
+        ),
+    ] {
+        if is_given {
+            given.push(name);
+        }
+    }
+    let mut out = String::new();
+    // Writing to a `String` cannot fail.
+    let _ = write!(
+        out,
+        "clock: {} {}\n\
+         operation_id: {}\n\
+         expected_revision: {}\n\
+         expires_at: {}\n\
+         instance_id: {}\n\
+         recovery_key_epoch: {}\n\
+         admin_id: {}\n\
+         credential_id: {}\n\
+         binding_id: {}\n\
+         public_identity: {}\n\
+         trust_anchor_ref: {}\n\
+         new_recovery_public_key: {}\n\
+         given: {}\n\
+         not checked (generated by the service): admin_id, credential_id, binding_id\n",
+        clock.source,
+        clock.now_micros,
+        quoted(challenge.operation_id()),
+        challenge.expected_revision(),
+        challenge.expires_at_micros(),
+        quoted(&plan.instance_id),
+        plan.recovery_key_epoch,
+        quoted(&plan.admin_id),
+        quoted(&plan.credential_id),
+        quoted(&plan.binding_id),
+        quoted(&plan.public_identity),
+        quoted(&plan.trust_anchor_ref),
+        plan.new_recovery_public_key.to_hex(),
+        given.join(", "),
+    );
+    out
+}
