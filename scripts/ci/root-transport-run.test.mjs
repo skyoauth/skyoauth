@@ -486,7 +486,7 @@ function workspaceTargets() {
     const toml = read(join(dir, 'Cargo.toml'));
     const pkg = /^\[package\]\nname = "([^"]+)"$/m.exec(toml)[1];
     for (const table of toml.match(/^\[\[?[^\]]+\]\]?$/gm)) {
-      if (!['[package]', '[dependencies]', '[dev-dependencies]', '[build-dependencies]', '[features]', '[lints]', '[[test]]'].includes(table) && !/^\[(target\.|lints\.|package\.metadata)/.test(table)) throw new Error(`${dir}/Cargo.toml: ${table}: a table the target discovery does not read`);
+      if (!['[package]', '[dependencies]', '[dev-dependencies]', '[build-dependencies]', '[features]', '[lints]', '[[test]]', '[[bin]]'].includes(table) && !/^\[(target\.|lints\.|package\.metadata)/.test(table)) throw new Error(`${dir}/Cargo.toml: ${table}: a table the target discovery does not read`);
     }
     for (const d of ['examples', 'benches']) if (exists(join(dir, d))) throw new Error(`${dir}/${d}: targets the discovery does not read`);
     const at = (f) => exists(join(dir, f));
@@ -496,6 +496,17 @@ function workspaceTargets() {
     for (const e of entries('src/bin')) {
       if (e.isFile() && e.name.endsWith('.rs')) out.push({ id: `${pkg}::bin/${e.name.slice(0, -3)}`, kind: 'bin', root: join(dir, 'src/bin', e.name) });
       else if (e.isDirectory() && at(`src/bin/${e.name}/main.rs`)) out.push({ id: `${pkg}::bin/${e.name}`, kind: 'bin', root: join(dir, 'src/bin', e.name, 'main.rs') });
+    }
+    // A `[[bin]]` is read only as `test = false` (no test target) at the path
+    // discovery already found; anything else throws, to be added here.
+    for (const block of toml.split(/^\[\[bin\]\]$/m).slice(1)) {
+      const body = block.split(/^\[/m)[0];
+      const name = /^name = "([^"]+)"$/m.exec(body)?.[1];
+      const path = /^path = "([^"]+)"$/m.exec(body)?.[1];
+      if (!name || !/^test = false$/m.test(body) || path !== `src/bin/${name}/main.rs`) throw new Error(`${dir}/Cargo.toml: [[bin]] ${name}: only \`test = false\` at src/bin/<name>/main.rs is read`);
+      const at = out.findIndex((t) => t.id === `${pkg}::bin/${name}`);
+      if (at < 0) throw new Error(`${dir}/Cargo.toml: [[bin]] ${name}: not a discovered binary`);
+      out.splice(at, 1);
     }
     if (!/^autotests = false$/m.test(toml)) {
       for (const e of entries('tests')) {
@@ -1403,7 +1414,17 @@ const rustFiles = () => {
   return out.sort();
 };
 // The .rs files no test target compiles in, each with a reason.
-const NOT_IN_A_TARGET = { 'service/build.rs': 'the build script: it is no test target and prints no test output' };
+const OPERATOR_BIN = 'the operator binary (`test = false`): it holds no tests; the operator target runs the built binary';
+const NOT_IN_A_TARGET = {
+  'service/build.rs': 'the build script: it is no test target and prints no test output',
+  'operator/src/bin/skyoauth-operator/args.rs': OPERATOR_BIN,
+  'operator/src/bin/skyoauth-operator/artifact.rs': OPERATOR_BIN,
+  'operator/src/bin/skyoauth-operator/cmd_verify_challenge.rs': OPERATOR_BIN,
+  'operator/src/bin/skyoauth-operator/cmd_verify_response.rs': OPERATOR_BIN,
+  'operator/src/bin/skyoauth-operator/input.rs': OPERATOR_BIN,
+  'operator/src/bin/skyoauth-operator/main.rs': OPERATOR_BIN,
+  'operator/src/bin/skyoauth-operator/show.rs': OPERATOR_BIN,
+};
 
 // A scratch copy of a test function's text with a line added after its
 // first line (in memory, see withSources).
@@ -1482,7 +1503,7 @@ describe('the workspace\'s Rust sources', () => {
     // Only operator and scenarios declare their test targets.
     assert.deepEqual(targets.filter((x) => x.kind === 'test' && !x.id.startsWith('skyoauth-service::')).map((x) => x.id), ['skyoauth-scenarios::pg', 'skyoauth-operator::operator']);
     const files = workspaceFiles();
-    assert.deepEqual(rustFiles().filter((f) => !files.has(f)), Object.keys(NOT_IN_A_TARGET));
+    assert.deepEqual(rustFiles().filter((f) => !files.has(f)), Object.keys(NOT_IN_A_TARGET).sort());
     t.diagnostic(`${targets.length} test targets (${targets.map((x) => x.id).join(', ')}), ${files.size} files`);
     // A module the walk cannot follow, or a #[path] or include! it would
     // have to, fails instead of leaving a file unread.
