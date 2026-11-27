@@ -5,15 +5,19 @@
 //! artifact of every case of `signature.v1.json`, every refusal, every
 //! usage error, the file errors and their size limits, and malformed
 //! artifacts that must be refused without a panic
-//! (docs/proposals/operator-cli-artifacts.md). `sign` is in [`sign`].
+//! (docs/proposals/operator-cli-artifacts.md). `sign` is in [`sign`]; the
+//! online commands, against a fake service on a Unix socket, in [`online`]
+//! (docs/proposals/operator-cli-online.md).
 //!
 //! Every run is checked for what it must never do: end in another exit
-//! code than 0 to 4 (a panic is 101), print a byte that is not printable
-//! ASCII or a newline (an artifact's control character must not reach the
-//! terminal), or print a signature or a seed.
+//! code than 0 to 4 (0 to 6 for the online commands; a panic is 101),
+//! print a byte that is not printable ASCII or a newline (an artifact's
+//! control character must not reach the terminal), or print a signature or
+//! a seed.
 //!
 //! Portable: the Unix-only cases are gated.
 
+mod online;
 mod sign;
 
 use std::{
@@ -130,6 +134,12 @@ fn run<S: AsRef<OsStr>>(arguments: &[S]) -> Run {
 
 /// [`run`] in the working directory `dir`, when given.
 fn run_in<S: AsRef<OsStr>>(dir: Option<&Path>, arguments: &[S]) -> Run {
+    run_up_to(dir, arguments, 4)
+}
+
+/// [`run_in`], with exit codes from 0 to `highest` allowed: 4 for the
+/// offline commands, 6 for the online ones.
+fn run_up_to<S: AsRef<OsStr>>(dir: Option<&Path>, arguments: &[S], highest: i32) -> Run {
     let mut command = Command::new(BINARY);
     command.args(arguments).stdin(Stdio::null());
     if let Some(dir) = dir {
@@ -137,7 +147,10 @@ fn run_in<S: AsRef<OsStr>>(dir: Option<&Path>, arguments: &[S]) -> Run {
     }
     let output = command.output().expect("the binary runs");
     let code = output.status.code().expect("the binary exits with a code");
-    assert!((0..=4).contains(&code), "exit code {code}: {output:?}");
+    assert!(
+        (0..=highest).contains(&code),
+        "exit code {code}: {output:?}"
+    );
     for stream in [&output.stdout, &output.stderr] {
         assert!(
             stream

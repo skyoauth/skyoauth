@@ -1,8 +1,8 @@
-//! `skyoauth-operator`: the offline operator command line (T13.10; the
-//! artifact formats and exit codes are in
-//! `docs/proposals/operator-cli-artifacts.md`).
+//! `skyoauth-operator`: the operator command line (T13.10; the artifact
+//! formats and exit codes are in `docs/proposals/operator-cli-artifacts.md`,
+//! the online commands in `docs/proposals/operator-cli-online.md`).
 //!
-//! Three commands, all offline:
+//! Three commands offline:
 //!
 //! - `verify-challenge` reads a challenge artifact (the `issue_challenge`
 //!   reply line, verbatim), checks it with
@@ -18,24 +18,46 @@
 //!   challenge with a recovery public key, as the service's restore checks
 //!   it ([`verify_response`](skyoauth_operator::recovery::verify_response)).
 //!
+//!
+//! And two online, which read the service's state over its
+//! deployment-local Unix socket and change nothing there (Unix only:
+//! elsewhere they are parsed, then refused with exit 2; slice 1 of the
+//! proposal, whose writes `bootstrap`, `issue-challenge` and `restore` are
+//! not implemented and are refused with exit 2):
+//!
+//! - `preview` sends a response artifact and prints what its restore would
+//!   enroll;
+//! - `status` prints the recovery state, an operation's state (every
+//!   credential ID a restore revoked, page by page) and a key's
+//!   enrollment, and, to reconcile a restore or a bootstrap of unknown
+//!   outcome, the verdict and the next step.
+//!
 //! Results go to standard output, errors to standard error, both
 //! deterministic for the same arguments and files (the system clock aside,
-//! which `--now` replaces). Nothing reads the environment. The only file
-//! written is `sign`'s `--out`, created new; the only private key is the
-//! seed of `sign`'s `--seed-file`, read from that file only, never shown.
-//! No signature is shown: `sign` writes it to `--out` only.
+//! which `--now` replaces, and the service's answers). Nothing reads the
+//! environment. The only file written is `sign`'s `--out`, created new; the
+//! only private key is the seed of `sign`'s `--seed-file`, read from that
+//! file only, never shown. No signature is shown: `sign` writes it to
+//! `--out` only, and `preview` sends it to the socket only. No message names
+//! a path, the socket's included.
 //!
 //! Exit codes: [`EXIT_OK`], [`EXIT_REFUSED`], [`EXIT_USAGE`], [`EXIT_IO`],
-//! [`EXIT_NOT_CONFIRMED`].
+//! [`EXIT_NOT_CONFIRMED`], [`EXIT_UNKNOWN`], [`EXIT_UNCHANGED`].
 
 #![forbid(unsafe_code)]
 
 mod args;
 mod artifact;
+#[cfg(unix)]
+mod cmd_preview;
 mod cmd_sign;
+#[cfg(unix)]
+mod cmd_status;
 mod cmd_verify_challenge;
 mod cmd_verify_response;
 mod input;
+#[cfg(unix)]
+mod online;
 mod out_file;
 mod seed_file;
 mod show;
@@ -57,7 +79,9 @@ const EXIT_OK: u8 = 0;
 const EXIT_REFUSED: u8 = 1;
 
 /// The command line is wrong: an unknown command or flag, a flag missing,
-/// repeated or without a value, a value that does not parse.
+/// repeated or without a value, a value that does not parse; an online
+/// write this build does not implement; an online command on a platform
+/// without Unix sockets.
 const EXIT_USAGE: u8 = 2;
 
 /// A file could not be read (missing, not a regular file, too large,
@@ -72,6 +96,19 @@ const EXIT_IO: u8 = 3;
 /// given. Never 0: an omitted value is not a passed check.
 const EXIT_NOT_CONFIRMED: u8 = 4;
 
+/// The outcome of an online write is unknown: the service may have
+/// committed it. Do not repeat it: reconcile first. No command of this
+/// build writes, so none exits 5 yet; `preview` and `status` never do.
+const EXIT_UNKNOWN: u8 = 5;
+
+/// Nothing was changed by this command: the request was not sent, or the
+/// reply of a `preview` or a `status` cannot be believed (they change no
+/// row). The same command may be run again.
+const EXIT_UNCHANGED: u8 = 6;
+
+/// The line after the message of [`EXIT_UNCHANGED`]: what to do next.
+const UNCHANGED_NEXT: &str = "Nothing was changed by this command: it may be run again.\n";
+
 /// Why a command did not succeed, with its fixed message. The message
 /// never holds a signature, a seed, a key given on the command line, a
 /// file's bytes or a value of an artifact.
@@ -85,6 +122,12 @@ enum Failure {
     Io(String),
     /// [`EXIT_NOT_CONFIRMED`].
     NotConfirmed(String),
+    /// [`EXIT_UNKNOWN`].
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Unknown(String),
+    /// [`EXIT_UNCHANGED`].
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Unchanged(String),
 }
 
 impl Failure {
@@ -94,6 +137,8 @@ impl Failure {
             Self::Usage(_) => EXIT_USAGE,
             Self::Io(_) => EXIT_IO,
             Self::NotConfirmed(_) => EXIT_NOT_CONFIRMED,
+            Self::Unknown(_) => EXIT_UNKNOWN,
+            Self::Unchanged(_) => EXIT_UNCHANGED,
         }
     }
 
@@ -102,7 +147,9 @@ impl Failure {
             Self::Refused(message)
             | Self::Usage(message)
             | Self::Io(message)
-            | Self::NotConfirmed(message) => message,
+            | Self::NotConfirmed(message)
+            | Self::Unknown(message)
+            | Self::Unchanged(message) => message,
         }
     }
 }
@@ -132,7 +179,25 @@ fn run(command: Command) -> Outcome {
         Command::VerifyChallenge(flags) => cmd_verify_challenge::run(&flags),
         Command::Sign(flags) => cmd_sign::run(&flags),
         Command::VerifyResponse(flags) => cmd_verify_response::run(&flags),
+        #[cfg(unix)]
+        Command::Preview(flags) => cmd_preview::run(&flags),
+        #[cfg(unix)]
+        Command::Status(flags) => cmd_status::run(&flags),
+        #[cfg(not(unix))]
+        online @ (Command::Preview(_) | Command::Status(_)) => no_socket(&online),
     }
+}
+
+/// An online command on a platform without Unix sockets: parsed, then
+/// refused with a fixed text before any file is read
+/// (`docs/proposals/operator-cli-online.md`, Q7).
+#[cfg(not(unix))]
+fn no_socket(command: &Command) -> Outcome {
+    let name = command.online_name().unwrap_or("this command");
+    Failure::Usage(format!(
+        "{name} needs the deployment-local Unix socket, which this platform does not have"
+    ))
+    .into()
 }
 
 /// Writes `output` to standard output, flushed.
@@ -154,8 +219,10 @@ fn main() -> ExitCode {
     let mut errors = String::new();
     if let Err(failure) = &outcome.result {
         errors.push_str(&format!("skyoauth-operator: {}\n", failure.message()));
-        if matches!(failure, Failure::Usage(_)) {
-            errors.push_str("Run `skyoauth-operator --help` for the usage.\n");
+        match failure {
+            Failure::Usage(_) => errors.push_str("Run `skyoauth-operator --help` for the usage.\n"),
+            Failure::Unchanged(_) => errors.push_str(UNCHANGED_NEXT),
+            _ => {}
         }
     }
     // The result was not delivered: exit 3, whatever it was, and say why.

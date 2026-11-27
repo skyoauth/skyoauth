@@ -1,7 +1,7 @@
 # Proposal: the online operator commands over the deployment-local socket (D2)
 
 Status: Ruled by the lead 2026-11-27 (all eight recommendations accepted);
-implementation not started. This document changes no contract under `docs/contracts/` and no code. It
+slice 1: status and preview implemented. This document changes no contract under `docs/contracts/` and no code. It
 extends [the offline command line](operator-cli-artifacts.md) (D1) with the
 commands that talk to the service's deployment-local transport. "D2" here
 names this slice of the operator command line, not the entry "D2 names" of

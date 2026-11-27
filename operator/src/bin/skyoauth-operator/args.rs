@@ -7,8 +7,15 @@
 //!
 //! A refused argument is named by its flag, or by its position when it is
 //! not a flag: no message repeats a value given on the command line.
+//!
+//! The online commands (`preview` and `status`) take the socket flags
+//! ([`SocketFlags`]) and are parsed on every platform; only a Unix system
+//! runs them (`docs/proposals/operator-cli-online.md`, "Platforms"). The
+//! online writes (`bootstrap`, `issue-challenge`, `restore`) are not
+//! implemented: each is refused as a usage error before its flags are
+//! read.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use skyoauth_operator::recovery::RecoveryPublicKey;
 
@@ -27,7 +34,18 @@ Usage:
       --instance-id ID --epoch N --replacement-identity ID --trust-anchor REF
       --new-recovery-key HEX [--now MICROS]
   skyoauth-operator verify-response --challenge FILE --response FILE --key HEX
+  skyoauth-operator preview SOCKET --response FILE                 (Unix only)
+  skyoauth-operator status SOCKET [--challenge FILE | --response FILE]
+      [--credential-spki FILE]                                     (Unix only)
+  skyoauth-operator status SOCKET --reconcile restore
+      (--challenge FILE | --response FILE)                         (Unix only)
+  skyoauth-operator status SOCKET --reconcile bootstrap --instance-id ID
+      --credential-spki FILE --trust-anchor REF --recovery-key HEX (Unix only)
   skyoauth-operator --help
+
+  SOCKET is: --socket PATH --service-uid UID
+      [--trust-ancestors service-or-root|root-only]
+      [--total-wait SECONDS] [--idle-wait SECONDS]
 
 verify-challenge reads the challenge artifact (the issue_challenge reply
 line, verbatim), checks it against the given values and the clock, and
@@ -72,13 +90,43 @@ challenge with the recovery public key --key (64 lowercase hex digits).
 --now MICROS is the time to check against, in microseconds since the Unix
 epoch; without it the system clock is used. The clock used is printed.
 
+preview and status talk to the service's deployment-local Unix socket, on
+the service's host, as the service UID or root; neither changes anything
+on the service, and neither takes a private key. --socket is the socket's
+path (required, no default). It is checked before the connect: every
+directory on the way owned by a trusted UID and not writable by others,
+the socket's own directory private, the socket owned by --service-uid
+(required) with mode 0600 exactly. --trust-ancestors names the trusted
+UIDs: service-or-root (the default: root and --service-uid) or root-only.
+--total-wait (default 100) and --idle-wait (default 10) are whole seconds
+over zero; the defaults fit a service with its default settings, so a
+command may wait 100 seconds.
+
+preview sends the response artifact (--response) and prints what its
+restore would enroll. status prints the recovery state, and every member
+of the reply (null where the service wrote null): with --challenge or
+--response also the state of that operation (for a restored one, every
+revoked credential ID, read page by page: revoked_credential_ids: N is
+followed by N revoked_credential_id lines), with --credential-spki (a file
+of the DER SubjectPublicKeyInfo, 1 to 4096 bytes) also that key's
+enrollment. status --reconcile restore or --reconcile bootstrap adds a
+verdict: line and a next: line, the step to take after a restore or a
+bootstrap whose outcome is unknown; it exits 0 whatever the verdict.
+bootstrap, issue-challenge and restore are not implemented in this build.
+On a platform without Unix sockets, preview and status exit 2.
+
 Exit codes: 0 every check passed (verify-challenge: the replacement is
-confirmed; sign: the response is written), or the help was printed; 1
-refused (sign: also a seed file of at most 128 bytes that is not a seed); 2
-usage error; 3 a file, the clock or the output could not be read or
-written (sign: also a seed file that is not protected as above or is larger
-than 128 bytes, or an --out that exists); 4 (verify-challenge) every given
-check passed, but the replacement is not confirmed.
+confirmed; sign: the response is written; preview, status: the service
+answered), or the help was printed; 1 refused (sign: also a seed file of at
+most 128 bytes that is not a seed; preview, status: also refused by the
+service, or a response whose signature is not 64 bytes, before anything is
+sent); 2 usage error; 3 a file, the clock or the output could not be read
+or written (sign: also a seed file that is not protected as above or is
+larger than 128 bytes, or an --out that exists); 4 (verify-challenge) every
+given check passed, but the replacement is not confirmed; 5 the outcome of
+a write is unknown: reconcile first (no command of this build writes); 6
+nothing was changed: the request was not sent, or the reply of preview or
+status cannot be believed; the same command may be run again.
 ";
 
 /// A command and its flags.
@@ -92,6 +140,12 @@ pub enum Command {
     Sign(Sign),
     /// `verify-response`.
     VerifyResponse(VerifyResponse),
+    /// `preview` (its flags are read on Unix only).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Preview(Preview),
+    /// `status` (its flags are read on Unix only).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Status(Status),
 }
 
 /// The flags of `verify-challenge`.
@@ -128,9 +182,94 @@ pub struct VerifyResponse {
     pub key: RecoveryPublicKey,
 }
 
+/// Whom the client trusts with the directories on the way to the socket
+/// (`--trust-ancestors`; the library's `AncestorTrust`, which is Unix
+/// only).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TrustAncestors {
+    /// `service-or-root`, the default.
+    ServiceOrRoot,
+    /// `root-only`.
+    RootOnly,
+}
+
+/// The socket flags of every online command (unread off Unix, where the
+/// command ends once they are parsed).
+#[cfg_attr(not(unix), allow(dead_code))]
+pub struct SocketFlags {
+    /// `--socket`, required.
+    pub socket: PathBuf,
+    /// `--service-uid`, required: the socket's expected owner.
+    pub service_uid: u32,
+    /// `--trust-ancestors`, default `service-or-root`.
+    pub trust_ancestors: TrustAncestors,
+    /// `--total-wait`, whole seconds over zero, default 100.
+    pub total_wait: Duration,
+    /// `--idle-wait`, whole seconds over zero, default 10.
+    pub idle_wait: Duration,
+}
+
+/// The flags of `preview`.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub struct Preview {
+    pub socket: SocketFlags,
+    pub response: PathBuf,
+}
+
+/// The artifact that names an operation for `status`: `--challenge` or
+/// `--response`, its operation ID read from it.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub enum OperationArtifact {
+    Challenge(PathBuf),
+    Response(PathBuf),
+}
+
+/// What `status` asks.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub enum StatusQuery {
+    /// `status`, with an operation, a key, both or neither.
+    Read {
+        operation: Option<OperationArtifact>,
+        credential_spki: Option<PathBuf>,
+    },
+    /// `status --reconcile restore`: the operation alone.
+    ReconcileRestore(OperationArtifact),
+    /// `status --reconcile bootstrap`: the bootstrap's four values.
+    ReconcileBootstrap {
+        instance_id: String,
+        credential_spki: PathBuf,
+        trust_anchor: String,
+        recovery_key: RecoveryPublicKey,
+    },
+}
+
+/// The flags of `status`.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub struct Status {
+    pub socket: SocketFlags,
+    pub query: StatusQuery,
+}
+
+impl Command {
+    /// The name of an online command, which needs the Unix socket.
+    #[cfg_attr(unix, allow(dead_code))]
+    pub const fn online_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Preview(_) => Some(PREVIEW),
+            Self::Status(_) => Some(STATUS),
+            Self::Help | Self::VerifyChallenge(_) | Self::Sign(_) | Self::VerifyResponse(_) => None,
+        }
+    }
+}
+
 const VERIFY_CHALLENGE: &str = "verify-challenge";
 const VERIFY_RESPONSE: &str = "verify-response";
 const SIGN: &str = "sign";
+const PREVIEW: &str = "preview";
+const STATUS: &str = "status";
+
+/// The online writes of the proposal that this build does not implement.
+const NOT_IMPLEMENTED: [&str; 3] = ["bootstrap", "issue-challenge", "restore"];
 
 const CHALLENGE: &str = "--challenge";
 const INSTANCE_ID: &str = "--instance-id";
@@ -143,6 +282,20 @@ const RESPONSE: &str = "--response";
 const KEY: &str = "--key";
 const SEED_FILE: &str = "--seed-file";
 const OUT: &str = "--out";
+const SOCKET: &str = "--socket";
+const SERVICE_UID: &str = "--service-uid";
+const TRUST_ANCESTORS: &str = "--trust-ancestors";
+const TOTAL_WAIT: &str = "--total-wait";
+const IDLE_WAIT: &str = "--idle-wait";
+const CREDENTIAL_SPKI: &str = "--credential-spki";
+const RECONCILE: &str = "--reconcile";
+const RECOVERY_KEY: &str = "--recovery-key";
+
+/// The defaults of `--total-wait` and `--idle-wait`, in seconds: the
+/// library's `DEFAULT_TOTAL_WAIT` and `DEFAULT_IDLE_WAIT` (Unix only, so
+/// repeated here; `operator/tests/cli/online.rs` checks they agree).
+const DEFAULT_TOTAL_WAIT_SECONDS: u64 = 100;
+const DEFAULT_IDLE_WAIT_SECONDS: u64 = 10;
 
 /// The flags of each command.
 const VERIFY_CHALLENGE_FLAGS: [&str; 7] = [
@@ -166,6 +319,28 @@ const SIGN_FLAGS: [&str; 9] = [
     NOW,
 ];
 const VERIFY_RESPONSE_FLAGS: [&str; 3] = [CHALLENGE, RESPONSE, KEY];
+const PREVIEW_FLAGS: [&str; 6] = [
+    SOCKET,
+    SERVICE_UID,
+    TRUST_ANCESTORS,
+    TOTAL_WAIT,
+    IDLE_WAIT,
+    RESPONSE,
+];
+const STATUS_FLAGS: [&str; 12] = [
+    SOCKET,
+    SERVICE_UID,
+    TRUST_ANCESTORS,
+    TOTAL_WAIT,
+    IDLE_WAIT,
+    CHALLENGE,
+    RESPONSE,
+    CREDENTIAL_SPKI,
+    RECONCILE,
+    INSTANCE_ID,
+    TRUST_ANCHOR,
+    RECOVERY_KEY,
+];
 
 fn usage(message: impl Into<String>) -> Failure {
     Failure::Usage(message.into())
@@ -247,7 +422,88 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, F
                 now: given.integer(NOW)?,
             }))
         }
+        Some(PREVIEW) => {
+            let Some(mut given) = Given::read(PREVIEW, &PREVIEW_FLAGS, flags)? else {
+                return Ok(Command::Help);
+            };
+            Ok(Command::Preview(Preview {
+                socket: given.socket_flags()?,
+                response: given.required_path(RESPONSE)?,
+            }))
+        }
+        Some(STATUS) => {
+            let Some(mut given) = Given::read(STATUS, &STATUS_FLAGS, flags)? else {
+                return Ok(Command::Help);
+            };
+            let socket = given.socket_flags()?;
+            let query = status_query(&mut given)?;
+            Ok(Command::Status(Status { socket, query }))
+        }
+        Some(name) if NOT_IMPLEMENTED.contains(&name) => Err(usage(format!(
+            "{name} is not implemented in this build: of the online commands, only preview and \
+             status are; nothing was sent"
+        ))),
         _ => Err(usage("unknown command (argument 1)")),
+    }
+}
+
+/// What `status` asks, from its flags but the socket's: a selector
+/// (`--challenge` or `--response`, at most one), a key, or a reconcile
+/// with exactly the flags it takes.
+fn status_query(given: &mut Given) -> Result<StatusQuery, Failure> {
+    let reconcile = given.text(RECONCILE)?;
+    let challenge = given.take(CHALLENGE).map(PathBuf::from);
+    let response = given.take(RESPONSE).map(PathBuf::from);
+    let operation = match (challenge, response) {
+        (Some(_), Some(_)) => {
+            return Err(usage(format!(
+                "{CHALLENGE} and {RESPONSE} cannot both be given"
+            )));
+        }
+        (Some(path), None) => Some(OperationArtifact::Challenge(path)),
+        (None, Some(path)) => Some(OperationArtifact::Response(path)),
+        (None, None) => None,
+    };
+    match reconcile.as_deref() {
+        None => {
+            given.refuse(&[INSTANCE_ID, TRUST_ANCHOR, RECOVERY_KEY], |flag| {
+                format!("{flag} is only for {RECONCILE} bootstrap")
+            })?;
+            Ok(StatusQuery::Read {
+                operation,
+                credential_spki: given.take(CREDENTIAL_SPKI).map(PathBuf::from),
+            })
+        }
+        Some("restore") => {
+            given.refuse(&[CREDENTIAL_SPKI], |flag| {
+                format!("{flag} is not for {RECONCILE} restore")
+            })?;
+            given.refuse(&[INSTANCE_ID, TRUST_ANCHOR, RECOVERY_KEY], |flag| {
+                format!("{flag} is only for {RECONCILE} bootstrap")
+            })?;
+            let operation = operation.ok_or_else(|| {
+                usage(format!(
+                    "{RECONCILE} restore needs {CHALLENGE} or {RESPONSE}"
+                ))
+            })?;
+            Ok(StatusQuery::ReconcileRestore(operation))
+        }
+        Some("bootstrap") => {
+            if operation.is_some() {
+                return Err(usage(format!(
+                    "{CHALLENGE} and {RESPONSE} are not for {RECONCILE} bootstrap"
+                )));
+            }
+            Ok(StatusQuery::ReconcileBootstrap {
+                instance_id: given.required_text(INSTANCE_ID)?,
+                credential_spki: given.required_path(CREDENTIAL_SPKI)?,
+                trust_anchor: given.required_text(TRUST_ANCHOR)?,
+                recovery_key: given
+                    .key(RECOVERY_KEY)?
+                    .ok_or_else(|| usage(format!("{RECOVERY_KEY} is required")))?,
+            })
+        }
+        Some(_) => Err(usage(format!("{RECONCILE} is not restore or bootstrap"))),
     }
 }
 
@@ -339,6 +595,66 @@ impl Given {
                 })
             })
             .transpose()
+    }
+
+    /// Refuses the first of `flags` that was given, with `message` of it.
+    fn refuse(&self, flags: &[&str], message: impl Fn(&str) -> String) -> Result<(), Failure> {
+        match flags
+            .iter()
+            .find(|flag| self.values.iter().any(|(given, _)| given == *flag))
+        {
+            Some(flag) => Err(usage(message(flag))),
+            None => Ok(()),
+        }
+    }
+
+    /// The socket flags, `--socket` and `--service-uid` required.
+    fn socket_flags(&mut self) -> Result<SocketFlags, Failure> {
+        let socket = self.required_path(SOCKET)?;
+        let service_uid = self
+            .text(SERVICE_UID)?
+            .ok_or_else(|| usage(format!("{SERVICE_UID} is required")))?;
+        let service_uid = decimal(&service_uid)
+            .and_then(|uid| u32::try_from(uid).ok())
+            .ok_or_else(|| {
+                usage(format!(
+                    "{SERVICE_UID} is not a UID: an integer from 0 to 4294967295 in its shortest \
+                     decimal form"
+                ))
+            })?;
+        let trust_ancestors = match self.text(TRUST_ANCESTORS)?.as_deref() {
+            None | Some("service-or-root") => TrustAncestors::ServiceOrRoot,
+            Some("root-only") => TrustAncestors::RootOnly,
+            Some(_) => {
+                return Err(usage(format!(
+                    "{TRUST_ANCESTORS} is not service-or-root or root-only"
+                )));
+            }
+        };
+        Ok(SocketFlags {
+            socket,
+            service_uid,
+            trust_ancestors,
+            total_wait: self.seconds(TOTAL_WAIT, DEFAULT_TOTAL_WAIT_SECONDS)?,
+            idle_wait: self.seconds(IDLE_WAIT, DEFAULT_IDLE_WAIT_SECONDS)?,
+        })
+    }
+
+    /// A wait of whole seconds over zero, `default` when not given.
+    fn seconds(&mut self, flag: &str, default: u64) -> Result<Duration, Failure> {
+        let Some(text) = self.text(flag)? else {
+            return Ok(Duration::from_secs(default));
+        };
+        decimal(&text)
+            .and_then(|seconds| u64::try_from(seconds).ok())
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs)
+            .ok_or_else(|| {
+                usage(format!(
+                    "{flag} is not a whole number of seconds over zero in its shortest decimal \
+                     form"
+                ))
+            })
     }
 
     fn key(&mut self, flag: &str) -> Result<Option<RecoveryPublicKey>, Failure> {
