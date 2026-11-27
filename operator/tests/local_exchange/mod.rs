@@ -9,7 +9,7 @@
 //! - the refusals, by operation (lead ruling): `auth_unavailable` and
 //!   `server_error` after a write (`bootstrap`, `issue_challenge`,
 //!   `restore`) are unknown outcomes carrying the code, every other
-//!   refusal, and these two after a `preview`, are refused;
+//!   refusal, and these two after a `preview` or a `status`, are refused;
 //! - an issued reply whose members are not its challenge's is unknown;
 //! - after a failed write (a broken pipe), a failed end of the write half
 //!   or a reset, the reply is still read and the bytes read are kept, but
@@ -63,9 +63,10 @@ use std::{
 use serde_json::Value;
 use skyoauth_operator::{
     local::{
-        BootstrapRequest, CallError, Connector, DEFAULT_IDLE_WAIT, DEFAULT_TOTAL_WAIT, ErrorCode,
-        HalfClose, IssueChallengeRequest, Issued, LocalClient, MAX_REPLY_BYTES, MAX_REQUEST_BYTES,
-        NotSent, Op, Reply, Request, ResponseRequest, Retry, SocketPath, StatusRequest, Timeouts,
+        BootstrapRequest, BootstrapVerdict, CallError, Connector, DEFAULT_IDLE_WAIT,
+        DEFAULT_TOTAL_WAIT, ErrorCode, HalfClose, IssueChallengeRequest, Issued, LocalClient,
+        MAX_REPLY_BYTES, MAX_REQUEST_BYTES, MAX_REVOKED_IDS_PER_REPLY, NotSent, Op, Reply, Request,
+        ResponseRequest, RestoreVerdict, Restored, Retry, SocketPath, StatusRequest, Timeouts,
         UnknownOutcome, parse_reply,
     },
     recovery::RecoveryPublicKey,
@@ -143,17 +144,6 @@ fn counted(path: &Path, timeouts: Timeouts) -> (LocalClient<Counted>, Arc<Atomic
     (client, connects)
 }
 
-/// The operations the client has a typed call for: every one but
-/// `status`, whose typed call (`LocalClient::status`) comes with the
-/// operator slice C4 (lead's scope for the service PR). The loops over the
-/// operations run over these; `status`'s classification of a refusal is
-/// checked by the exchange's unit test
-/// (`only_the_three_writes_make_a_store_failure_uncertain`) and its codec
-/// by `local_wire`.
-fn typed_ops() -> impl Iterator<Item = Op> {
-    Op::ALL.into_iter().filter(|op| *op != Op::Status)
-}
-
 /// Calls the operation of `request` through its typed method, as a
 /// [`Reply`] (an issue's challenge back as its reply's members).
 fn call<C: Connector>(client: &LocalClient<C>, request: &Request) -> Result<Reply, CallError> {
@@ -169,7 +159,9 @@ fn call<C: Connector>(client: &LocalClient<C>, request: &Request) -> Result<Repl
         }),
         Request::Preview(response) => client.preview(response).map(Reply::Previewed),
         Request::Restore(response) => client.restore(response).map(Reply::Restored),
-        Request::Status(_) => unreachable!("no typed call for status before C4: see typed_ops"),
+        Request::Status(request) => client
+            .status(request)
+            .map(|status| Reply::Status(Box::new(status))),
     }
 }
 
@@ -339,7 +331,7 @@ fn against(
 /// issue the challenge `M` whose members are the reply's.
 #[test]
 fn each_golden_success_is_its_operations_success() {
-    for op in typed_ops() {
+    for op in Op::ALL {
         let reply = golden_success(op);
         let expected = parse_reply(op, &reply).unwrap();
         let (outcome, _) = against(&request(op), PATIENT, move |mut accepted| {
@@ -363,8 +355,9 @@ fn refused(op: Op, code: ErrorCode) -> Result<Reply, CallError> {
 /// The refusals, by operation and code (lead ruling): `auth_unavailable`
 /// and `server_error`, which a failed `COMMIT` is also answered with, are
 /// unknown outcomes carrying the code after every write (`bootstrap`,
-/// `issue_challenge`, `restore`), and refusals after a `preview`; every
-/// other code is a refusal after every operation.
+/// `issue_challenge`, `restore`), and refusals after a `preview` or a
+/// `status`, which change no row (mutant M9); every other code is a
+/// refusal after every operation.
 #[test]
 fn store_failures_are_uncertain_commits_after_a_write() {
     for code in [ErrorCode::AuthUnavailable, ErrorCode::ServerError] {
@@ -375,11 +368,13 @@ fn store_failures_are_uncertain_commits_after_a_write() {
                 "{op:?} {code:?}"
             );
         }
-        assert_eq!(
-            refused(Op::Preview, code),
-            Err(CallError::Refused(code)),
-            "{code:?}"
-        );
+        for op in [Op::Preview, Op::Status] {
+            assert_eq!(
+                refused(op, code),
+                Err(CallError::Refused(code)),
+                "{op:?} {code:?}"
+            );
+        }
     }
     for code in [
         ErrorCode::Forbidden,
@@ -387,7 +382,7 @@ fn store_failures_are_uncertain_commits_after_a_write() {
         ErrorCode::Conflict,
         ErrorCode::NotRestorable,
     ] {
-        for op in typed_ops() {
+        for op in Op::ALL {
             assert_eq!(
                 refused(op, code),
                 Err(CallError::Refused(code)),
@@ -811,7 +806,7 @@ fn a_connection_that_cannot_be_made_is_not_sent() {
         (long, io::ErrorKind::InvalidInput),
     ];
     for (path, kind) in cases {
-        for op in typed_ops() {
+        for op in Op::ALL {
             let (client, connects) = counted(&path, PATIENT);
             let outcome = call(&client, &request(op));
             let Err(CallError::NotSent(NotSent::Connect(got))) = outcome else {
@@ -920,7 +915,7 @@ impl Connector for Stalled {
 #[test]
 fn a_write_that_times_out_is_unknown() {
     let client = LocalClient::with_connector(Stalled, PATIENT);
-    for op in typed_ops() {
+    for op in Op::ALL {
         let start = Instant::now();
         assert_eq!(
             call(&client, &request(op)),
@@ -1315,7 +1310,7 @@ fn a_half_close_that_fails_after_the_whole_line_still_reads_the_reply() {
                 Err(CallError::Unknown(UnknownOutcome::ConnectionLost(kind))),
             ),
         ];
-        for op in typed_ops() {
+        for op in Op::ALL {
             cases.push((
                 op,
                 golden_success(op),
@@ -1351,7 +1346,7 @@ fn a_wait_the_stream_refuses_ends_the_call() {
         io::ErrorKind::Unsupported,
         io::ErrorKind::Other,
     ] {
-        for op in typed_ops() {
+        for op in Op::ALL {
             let case = format!("{kind:?}, {op:?}");
             let plan = Plan {
                 write_waits: Some((0, kind)),
@@ -1512,6 +1507,23 @@ fn an_oversized_value_is_refused_before_it_is_copied() {
         response.operation_id = "o".repeat(len);
         assert_eq!(client.preview(&response).map(|_| ()), too_large, "{len}");
         assert_eq!(client.restore(&response).map(|_| ()), too_large, "{len}");
+        for status in [
+            StatusRequest {
+                operation_id: Some("o".repeat(len)),
+                ..StatusRequest::default()
+            },
+            StatusRequest {
+                credential_spki: Some(vec![0xc7; len / 2 + 1]),
+                ..StatusRequest::default()
+            },
+            StatusRequest {
+                operation_id: Some("o".into()),
+                revoked_after: Some("r".repeat(len)),
+                ..StatusRequest::default()
+            },
+        ] {
+            assert_eq!(client.status(&status).map(|_| ()), too_large, "{len}");
+        }
     }
     assert_eq!(connects.load(Ordering::SeqCst), 0);
 }
@@ -1713,7 +1725,7 @@ fn debug_and_display_show_no_value() {
         ),
         format!("{:?}", Retry::ReconcileFirst),
     ];
-    for op in typed_ops() {
+    for op in Op::ALL {
         let outcome = call(&client, &request(op));
         assert!(
             matches!(outcome, Err(CallError::NotSent(NotSent::Connect(_)))),
@@ -1733,6 +1745,7 @@ fn debug_and_display_show_no_value() {
             io::ErrorKind::ConnectionReset,
         )),
         CallError::Unknown(UnknownOutcome::ChallengeMismatch),
+        CallError::Unknown(UnknownOutcome::PageMismatch),
     ];
     errors.push(CallError::Unknown(UnknownOutcome::UncertainCommit(
         ErrorCode::AuthUnavailable,
@@ -1764,4 +1777,499 @@ fn debug_and_display_show_no_value() {
             .to_string()
             .contains("reconcile")
     );
+}
+
+/// The operation ID of the page iterator's walks.
+const WALKED: &str = "SENTINEL-WALKED";
+
+/// The revoked credential IDs `range`, in byte order (zero-padded).
+fn revoked(range: std::ops::Range<usize>) -> Vec<String> {
+    range.map(|at| format!("cred_{at:05}")).collect()
+}
+
+/// The `status` request of a walk of [`WALKED`]: after `after`, or its
+/// first page.
+fn page_request(after: Option<&str>) -> StatusRequest {
+    StatusRequest {
+        operation_id: Some(WALKED.into()),
+        credential_spki: None,
+        revoked_after: after.map(str::to_owned),
+    }
+}
+
+/// The page after the last of `held`.
+fn after(held: usize) -> StatusRequest {
+    page_request(Some(&revoked(0..held)[held - 1]))
+}
+
+/// A `status` reply line of a challenge in `state`, with `count` and the
+/// page `ids` (`null` for both when `None`), as the service writes it.
+fn status_line(state: &str, page: Option<(i64, &[String])>) -> Vec<u8> {
+    let (count, ids) = page.map_or_else(
+        || ("null".to_owned(), "null".to_owned()),
+        |(count, ids)| (count.to_string(), Value::from(ids.to_vec()).to_string()),
+    );
+    format!(
+        "{{\"server_time\":1,\"instance_id\":\"i\",\"recovery_key_epoch\":2,\
+         \"recovery_state_revision\":2,\"recovery_public_key\":\"{}\",\
+         \"operation_state\":\"{state}\",\"expires_at\":1,\"settles_at\":null,\
+         \"restored_at\":1,\"admin_id\":\"a\",\"credential_id\":\"c\",\"binding_id\":\"b\",\
+         \"revoked_credential_count\":{count},\"revoked_credential_ids\":{ids},\
+         \"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\
+         \"enrolled_trust_anchor_sha256\":null}}\n",
+        key().to_hex()
+    )
+    .into_bytes()
+}
+
+/// A `restored` `status` page: `count` and the IDs `range`.
+fn page(count: i64, range: std::ops::Range<usize>) -> Vec<u8> {
+    status_line("restored", Some((count, &revoked(range))))
+}
+
+/// A restore reply with `count` and the IDs `range`, as the codec gives it
+/// (the walk's input; a list of any length).
+fn restored(count: i64, range: std::ops::Range<usize>) -> Restored {
+    Restored {
+        admin_id: "a".into(),
+        credential_id: "c".into(),
+        binding_id: "b".into(),
+        revoked_credential_count: count,
+        revoked_credential_ids: revoked(range),
+        recovery_key_epoch: 2,
+        recovery_state_revision: 2,
+    }
+}
+
+/// A fake server that answers one connection per step, in order, each
+/// after it read exactly the step's request line and the end of the
+/// stream; it accepts nothing after the last step (a connection more is
+/// refused, or never answered). Returns its socket's directory and path,
+/// and the server to join.
+fn serve_in_order(steps: Vec<(Vec<u8>, Vec<u8>)>) -> (TempDir, PathBuf, thread::JoinHandle<()>) {
+    let dir = TempDir::new();
+    let path = dir.join("s");
+    let listener = UnixListener::bind(&path).unwrap();
+    let server = thread::spawn(move || {
+        for (line, reply) in steps {
+            let mut stream = accept_within(&listener);
+            stream.set_read_timeout(Some(TEST_WAIT)).unwrap();
+            stream.set_write_timeout(Some(TEST_WAIT)).unwrap();
+            read_request(&mut stream, &line);
+            stream.write_all(&reply).unwrap();
+        }
+    });
+    (dir, path, server)
+}
+
+/// The page iterator's walk of [`WALKED`] after `restored`, or from
+/// `status` alone, against a fake server of `steps`: each `status` request
+/// the walk must send, in order, and the reply to it. Checks that the
+/// walk made exactly these requests, one connection each.
+fn walked(
+    restored: Option<&Restored>,
+    steps: Vec<(StatusRequest, Vec<u8>)>,
+) -> Result<Vec<String>, CallError> {
+    let expected = steps.len();
+    let steps = steps
+        .into_iter()
+        .map(|(request, reply)| {
+            let line = Request::Status(request).encode().unwrap();
+            (line.as_bytes().to_vec(), reply)
+        })
+        .collect();
+    let (_dir, path, server) = serve_in_order(steps);
+    let (client, connects) = counted(&path, PATIENT);
+    let outcome = client.revoked_credential_ids(WALKED, restored);
+    server.join().expect("the fake server's checks");
+    assert_eq!(
+        connects.load(Ordering::SeqCst),
+        expected,
+        "one connect a page"
+    );
+    outcome
+}
+
+const PAGE_MISMATCH: Result<Vec<String>, CallError> =
+    Err(CallError::Unknown(UnknownOutcome::PageMismatch));
+
+/// After a restore reply, the walk reads the pages after its list with
+/// `status`, `revoked_after` the last ID held, until the count is held,
+/// each page `min(page size, count - held)` IDs: none for a complete list
+/// (no count, a short count, exactly a page), then one more ID, a full
+/// page and a part, two full pages.
+#[test]
+fn the_walk_reads_every_page_after_the_restore_reply() {
+    assert_eq!(MAX_REVOKED_IDS_PER_REPLY, 1000);
+    for count in [0, 3, 1000] {
+        let held = usize::try_from(count).unwrap();
+        assert_eq!(
+            walked(Some(&restored(count, 0..held)), Vec::new()),
+            Ok(revoked(0..held)),
+            "{count}"
+        );
+    }
+    assert_eq!(
+        walked(
+            Some(&restored(1001, 0..1000)),
+            vec![(after(1000), page(1001, 1000..1001))]
+        ),
+        Ok(revoked(0..1001))
+    );
+    assert_eq!(
+        walked(
+            Some(&restored(2500, 0..1000)),
+            vec![
+                (after(1000), page(2500, 1000..2000)),
+                (after(2000), page(2500, 2000..2500)),
+            ]
+        ),
+        Ok(revoked(0..2500))
+    );
+    assert_eq!(
+        walked(
+            Some(&restored(2000, 0..1000)),
+            vec![(after(1000), page(2000, 1000..2000))]
+        ),
+        Ok(revoked(0..2000))
+    );
+}
+
+/// Without a restore reply (a restore reconciled as committed), the walk
+/// starts from `status` alone: its first page, then the rest as after a
+/// restore reply.
+#[test]
+fn the_walk_from_status_alone_reads_every_page() {
+    assert_eq!(
+        walked(None, vec![(page_request(None), page(0, 0..0))]),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        walked(None, vec![(page_request(None), page(5, 0..5))]),
+        Ok(revoked(0..5))
+    );
+    assert_eq!(
+        walked(
+            None,
+            vec![
+                (page_request(None), page(2001, 0..1000)),
+                (after(1000), page(2001, 1000..2000)),
+                (after(2000), page(2001, 2000..2001)),
+            ]
+        ),
+        Ok(revoked(0..2001))
+    );
+}
+
+/// A restore reply whose list is not `min(count, page size)` IDs, longer
+/// or shorter (mutant M11), or whose count is negative, is unknown before
+/// any `status` call.
+#[test]
+fn a_restore_reply_list_of_another_length_than_its_count_is_unknown() {
+    for (count, range) in [
+        (3, 0..4),
+        (3, 0..2),
+        (0, 0..1),
+        (1, 0..0),
+        (1500, 0..999),
+        (1500, 0..1001),
+        (1000, 0..999),
+        (1000, 0..1001),
+        (-1, 0..0),
+    ] {
+        assert_eq!(
+            walked(Some(&restored(count, range.clone())), Vec::new()),
+            PAGE_MISMATCH,
+            "{count} {range:?}"
+        );
+    }
+}
+
+/// A `status` page shorter or longer than `min(page size, count - held)`
+/// is unknown: the last page, a middle page, an empty page, and the first
+/// page of a walk from `status` alone.
+#[test]
+fn a_status_page_of_another_length_is_unknown() {
+    let cases = [
+        (
+            Some(restored(1500, 0..1000)),
+            vec![(after(1000), page(1500, 1000..1499))],
+        ),
+        (
+            Some(restored(1500, 0..1000)),
+            vec![(after(1000), page(1500, 1000..1501))],
+        ),
+        (
+            Some(restored(1001, 0..1000)),
+            vec![(after(1000), page(1001, 1000..1000))],
+        ),
+        (
+            Some(restored(2500, 0..1000)),
+            vec![(after(1000), page(2500, 1000..1999))],
+        ),
+        (None, vec![(page_request(None), page(1500, 0..999))]),
+        (None, vec![(page_request(None), page(5, 0..4))]),
+        (None, vec![(page_request(None), page(5, 0..6))]),
+        (None, vec![(page_request(None), page(-1, 0..0))]),
+    ];
+    for (at, (restored, steps)) in cases.into_iter().enumerate() {
+        assert_eq!(walked(restored.as_ref(), steps), PAGE_MISMATCH, "case {at}");
+    }
+}
+
+/// A `status` page whose IDs are not all after the `revoked_after` sent is
+/// unknown: one that starts with it, one wholly before it.
+#[test]
+fn an_id_not_after_revoked_after_is_unknown() {
+    for ids in [revoked(999..1001), revoked(500..502)] {
+        let reply = status_line("restored", Some((1002, &ids)));
+        assert_eq!(
+            walked(Some(&restored(1002, 0..1000)), vec![(after(1000), reply)]),
+            PAGE_MISMATCH,
+            "{ids:?}"
+        );
+    }
+}
+
+/// A `status` count above the restore reply's is the documented tie: the
+/// walk restarts from `status` alone and lists what the service selects
+/// then. One below it is unknown, with no restart.
+#[test]
+fn a_status_count_above_the_restore_replys_restarts_from_status_alone() {
+    assert_eq!(
+        walked(
+            Some(&restored(1001, 0..1000)),
+            vec![
+                (after(1000), page(1002, 1000..1002)),
+                (page_request(None), page(1002, 0..1000)),
+                (after(1000), page(1002, 1000..1002)),
+            ]
+        ),
+        Ok(revoked(0..1002))
+    );
+    assert_eq!(
+        walked(
+            Some(&restored(1001, 0..1000)),
+            vec![(after(1000), page(1000, 1000..1000))]
+        ),
+        PAGE_MISMATCH
+    );
+}
+
+/// A count that changes between `status` pages is the documented tie: the
+/// walk restarts from `status` alone, once (up or down, after a restore
+/// reply or from `status` alone); a second change, or a second count above
+/// the restore reply's, is unknown.
+#[test]
+fn a_count_that_changes_between_status_pages_restarts_once_then_is_unknown() {
+    // Restarted, then complete.
+    assert_eq!(
+        walked(
+            Some(&restored(2500, 0..1000)),
+            vec![
+                (after(1000), page(2500, 1000..2000)),
+                (after(2000), page(2501, 2000..2501)),
+                (page_request(None), page(2501, 0..1000)),
+                (after(1000), page(2501, 1000..2000)),
+                (after(2000), page(2501, 2000..2501)),
+            ]
+        ),
+        Ok(revoked(0..2501))
+    );
+    assert_eq!(
+        walked(
+            Some(&restored(2500, 0..1000)),
+            vec![
+                (after(1000), page(2500, 1000..2000)),
+                (after(2000), page(2499, 2000..2499)),
+                (page_request(None), page(2499, 0..1000)),
+                (after(1000), page(2499, 1000..2000)),
+                (after(2000), page(2499, 2000..2499)),
+            ]
+        ),
+        Ok(revoked(0..2499))
+    );
+    assert_eq!(
+        walked(
+            None,
+            vec![
+                (page_request(None), page(1500, 0..1000)),
+                (after(1000), page(1499, 1000..1499)),
+                (page_request(None), page(1499, 0..1000)),
+                (after(1000), page(1499, 1000..1499)),
+            ]
+        ),
+        Ok(revoked(0..1499))
+    );
+    // Restarted, then a second change: unknown, with no second restart.
+    assert_eq!(
+        walked(
+            Some(&restored(2500, 0..1000)),
+            vec![
+                (after(1000), page(2500, 1000..2000)),
+                (after(2000), page(2501, 2000..2501)),
+                (page_request(None), page(2501, 0..1000)),
+                (after(1000), page(2502, 1000..2000)),
+            ]
+        ),
+        PAGE_MISMATCH
+    );
+    assert_eq!(
+        walked(
+            Some(&restored(1001, 0..1000)),
+            vec![
+                (after(1000), page(1002, 1000..1002)),
+                (page_request(None), page(1002, 0..1000)),
+                (after(1000), page(1003, 1000..1003)),
+            ]
+        ),
+        PAGE_MISMATCH
+    );
+    assert_eq!(
+        walked(
+            None,
+            vec![
+                (page_request(None), page(1500, 0..1000)),
+                (after(1000), page(1501, 1000..1501)),
+                (page_request(None), page(1501, 0..1000)),
+                (after(1000), page(1500, 1000..1500)),
+            ]
+        ),
+        PAGE_MISMATCH
+    );
+}
+
+/// A `status` that does not report the restore (another state, or no
+/// count or page) is unknown; a `status` call that fails ends the walk
+/// with its own error (a refusal: `status` changes no row).
+#[test]
+fn a_status_that_does_not_report_the_restore_ends_the_walk() {
+    assert_eq!(
+        walked(
+            None,
+            vec![(page_request(None), status_line("issued", None))]
+        ),
+        PAGE_MISMATCH
+    );
+    assert_eq!(
+        walked(
+            Some(&restored(1001, 0..1000)),
+            vec![(after(1000), status_line("restored", None))]
+        ),
+        PAGE_MISMATCH
+    );
+    assert_eq!(
+        walked(
+            Some(&restored(1001, 0..1000)),
+            vec![(
+                after(1000),
+                status_line("retired", Some((1001, &revoked(1000..1001))))
+            )]
+        ),
+        PAGE_MISMATCH
+    );
+    for (restored, request, code) in [
+        (
+            Some(restored(1001, 0..1000)),
+            after(1000),
+            ErrorCode::AuthUnavailable,
+        ),
+        (None, page_request(None), ErrorCode::InvalidRequest),
+        (None, page_request(None), ErrorCode::ServerError),
+    ] {
+        let reply = golden(&format!("error_{}", code.as_str()));
+        assert_eq!(
+            walked(restored.as_ref(), vec![(request, reply)]),
+            Err(CallError::Refused(code)),
+            "{code:?}"
+        );
+    }
+}
+
+/// The fixture's golden exchange, the bytes the real service sent, through
+/// the client's typed calls: each request line is the golden one, each
+/// outcome the golden reply's. Then the reconcile verdicts of its `status`
+/// replies: before the bootstrap, repeat it; after it, its state matches,
+/// enabled; after the restore, committed, and the walk holds the restore
+/// reply's complete list without a `status` call, or reads it from
+/// `status` alone with the golden `status` request of the operation. (The
+/// service is checked against the same lines by
+/// `tests/harness/local_transport_wire.rs`.)
+#[test]
+fn the_golden_exchange_through_the_client_reconciles() {
+    let fixture = wire_fixture();
+    let requests = list(&fixture, "golden_requests");
+    let replies = list(&fixture, "golden_replies");
+    let case = |cases: &[Value], name: &str| {
+        cases
+            .iter()
+            .find(|case| text(case, "case") == name)
+            .unwrap_or_else(|| panic!("no case {name}"))
+            .clone()
+    };
+    let mut outcomes = Vec::new();
+    for step in list(&fixture["exchange"], "steps") {
+        let request_case = case(requests, text(step, "request"));
+        let request = crate::local_wire::request_of(&request_case);
+        let line = text(&request_case, "line").as_bytes().to_vec();
+        assert_eq!(request.encode().unwrap().as_bytes(), line);
+        let reply = text(&case(replies, text(step, "reply")), "line")
+            .as_bytes()
+            .to_vec();
+        let expected = parse_reply(request.op(), &reply);
+        let (outcome, _) = against(&request, PATIENT, move |mut accepted| {
+            accepted.read_request();
+            accepted.stream.write_all(&reply).unwrap();
+        });
+        assert_eq!(outcome, expected, "{}", text(step, "request"));
+        outcomes.push((request, outcome));
+    }
+    let [
+        (_, Ok(Reply::Status(nothing))),
+        (Request::Bootstrap(bootstrap), Ok(Reply::Bootstrapped(_))),
+        (Request::Status(asked_key), Ok(Reply::Status(enrolled))),
+        _,
+        _,
+        (Request::Restore(restore), Ok(Reply::Restored(restored))),
+        (Request::Status(asked_operation), Ok(Reply::Status(after_restore))),
+        ..,
+    ] = outcomes.as_slice()
+    else {
+        panic!("the steps: {outcomes:?}");
+    };
+    assert_eq!(
+        BootstrapVerdict::of(bootstrap, nothing),
+        BootstrapVerdict::RepeatBootstrap
+    );
+    assert!(*asked_key == StatusRequest::reconciling_bootstrap(bootstrap));
+    assert_eq!(
+        BootstrapVerdict::of(bootstrap, enrolled),
+        BootstrapVerdict::Matches { enabled: true }
+    );
+    assert!(*asked_operation == StatusRequest::reconciling_restore(restore));
+    assert_eq!(RestoreVerdict::of(after_restore), RestoreVerdict::Committed);
+    // The restore reply's list is complete: no `status` call.
+    let (_dir, path, server) = serve_in_order(Vec::new());
+    let (client, connects) = counted(&path, PATIENT);
+    assert_eq!(
+        client.revoked_credential_ids(&restore.operation_id, Some(restored)),
+        Ok(restored.revoked_credential_ids.clone())
+    );
+    server.join().unwrap();
+    assert_eq!(connects.load(Ordering::SeqCst), 0);
+    // From `status` alone: the golden request and reply of the operation.
+    let request = text(&case(requests, "status_operation"), "line")
+        .as_bytes()
+        .to_vec();
+    let reply = text(&case(replies, "status_restored"), "line")
+        .as_bytes()
+        .to_vec();
+    let (_dir, path, server) = serve_in_order(vec![(request, reply)]);
+    let (client, connects) = counted(&path, PATIENT);
+    assert_eq!(
+        client.revoked_credential_ids(&restore.operation_id, None),
+        Ok(restored.revoked_credential_ids.clone())
+    );
+    server.join().unwrap();
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
 }
