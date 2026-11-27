@@ -465,9 +465,11 @@
 //! [`ChallengeStatus::Expiring`] until `expires_at` plus the caller's
 //! `settle` (its transaction timeout: a restore that took its `now` before
 //! the expiry has ended by then), [`ChallengeStatus::Expired`] after.
-//! Anything else (a consumed row whose outcome is not `restored`, an
-//! unconsumed one whose outcome is not `issued`, no state row to bind to)
-//! is [`StatusError::Inconsistent`]. Only `NotFound`, `Restored`, `Revoked`
+//! Anything else (a recovery challenge, whatever its own state, with no
+//! state row to bind to; a consumed row whose outcome is not `restored`;
+//! an unconsumed one whose outcome is not `issued`) is
+//! [`StatusError::Inconsistent`]: with no state row, only an ID that is no
+//! recovery challenge is `NotFound`. Only `NotFound`, `Restored`, `Revoked`
 //! and `Retired` are final; `Expired` is not (a later call with an earlier
 //! `now` can still consume, "Time").
 //!
@@ -697,9 +699,12 @@ const STATUS_BARRIER: &str = "SELECT FROM recovery_state FOR SHARE";
 
 /// The one statement of a status read, no lock: the state row, the
 /// operation row `$1`, the credential of public identity `$2`, and, when
-/// the operation is consumed, the count of the credentials revoked at its
-/// `consumed_at` and the page of their IDs after `$3` (none: from the
-/// first), at most `$4`, in byte order. Each of the three tables has at
+/// the operation is consumed and of kind `$5` ([`OPERATOR_RESTORATION`]),
+/// the count of the credentials revoked at its `consumed_at` and the page
+/// of their IDs after `$3` (none: from the first), at most `$4`, in byte
+/// order. The kind gate is only a cheap pre-filter, so that no other
+/// consumed row runs the two aggregates: [`is_restoration_challenge`]
+/// alone decides what is a recovery challenge. Each of the three tables has at
 /// most one row here (`recovery_state`'s unique index on `true`, the
 /// operation's key, `public_identity`'s unique key), so the statement
 /// returns exactly one row.
@@ -712,9 +717,10 @@ const READ_STATUS: &str = concat!(
      c.id AS enrolled_credential_id, c.admin_id AS enrolled_admin_id, \
      c.status AS enrolled_status, c.revoked_at IS NOT NULL AS enrolled_revoked, \
      c.trust_anchor_ref AS enrolled_trust_anchor_ref, \
-     CASE WHEN o.consumed THEN (SELECT count(*) FROM admin_credential r \
-       WHERE r.revoked_at = o.consumed_at) END AS revoked_count, \
-     CASE WHEN o.consumed THEN ARRAY(SELECT r.id FROM admin_credential r \
+     CASE WHEN o.consumed AND o.kind = $5::text THEN (SELECT count(*) \
+       FROM admin_credential r WHERE r.revoked_at = o.consumed_at) END AS revoked_count, \
+     CASE WHEN o.consumed AND o.kind = $5::text THEN ARRAY(SELECT r.id \
+       FROM admin_credential r \
        WHERE r.revoked_at = o.consumed_at \
          AND ($3::text IS NULL OR r.id > $3::text COLLATE \"C\") \
        ORDER BY r.id COLLATE \"C\" LIMIT $4) END AS revoked_page \
@@ -1776,6 +1782,7 @@ async fn read_status_row(
         .bind(public_identity)
         .bind(revoked_after)
         .bind(page_size)
+        .bind(OPERATOR_RESTORATION)
         .fetch_one(&mut **transaction)
         .await
 }
@@ -1834,6 +1841,11 @@ fn challenge_status(
     ) {
         return Ok(ChallengeStatus::NotFound);
     }
+    // A recovery challenge without a state row to bind to, whatever its
+    // own state.
+    let Some(state) = state else {
+        return Err(StatusError::Inconsistent);
+    };
     let origin = Origin::new("administrative_operation");
     let (Some(expires_us), Some(expires_at)) =
         (expires_at_us, timestamp(row, origin, "expires_at")?)
@@ -1872,9 +1884,6 @@ fn challenge_status(
     if outcome != ISSUED {
         return Err(StatusError::Inconsistent);
     }
-    let Some(state) = state else {
-        return Err(StatusError::Inconsistent);
-    };
     let expected_revision: i64 = row.try_get("expected_revision")?;
     if plan_binding(&plan) != Some((&state.instance_id[..], state.recovery_key_epoch))
         || expected_revision != state.revision

@@ -540,29 +540,24 @@ impl Reader<'_> {
 
     /// A page of revoked credential IDs: an array of strings, maybe empty,
     /// of at most [`MAX_REVOKED_IDS_PER_REPLY`], each greater than the one
-    /// before it in byte order (so none repeated).
+    /// before it in byte order (so none repeated). Checked as it is read:
+    /// the first ID past the limit or out of order ends the read.
     fn revoked_ids(&mut self) -> Result<Vec<String>, Malformed> {
-        let ids = self.strings()?;
-        let increasing = ids.windows(2).all(|pair| pair[0] < pair[1]);
-        if ids.len() <= MAX_REVOKED_IDS_PER_REPLY && increasing {
-            Ok(ids)
-        } else {
-            Err(Malformed)
-        }
-    }
-
-    /// An array of strings, maybe empty.
-    fn strings(&mut self) -> Result<Vec<String>, Malformed> {
         self.token("[")?;
-        let mut strings = Vec::new();
+        let mut ids: Vec<String> = Vec::new();
         if self.token("]").is_ok() {
-            return Ok(strings);
+            return Ok(ids);
         }
         loop {
-            strings.push(self.string()?);
+            let id = self.string()?;
+            if ids.len() == MAX_REVOKED_IDS_PER_REPLY || ids.last().is_some_and(|last| *last >= id)
+            {
+                return Err(Malformed);
+            }
+            ids.push(id);
             match self.next() {
                 Some(b',') => {}
-                Some(b']') => return Ok(strings),
+                Some(b']') => return Ok(ids),
                 _ => return Err(Malformed),
             }
         }

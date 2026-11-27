@@ -1241,8 +1241,9 @@ fn the_reply_cap_is_4_mib_with_the_newline() {
 /// A restore reply or a `status` page of exactly
 /// [`MAX_REVOKED_IDS_PER_REPLY`] revoked IDs, in byte order, is read (the
 /// count beyond it: the rest is paged by `status`); one more ID is
-/// malformed, an unknown outcome. The parser checks the bound and the order
-/// within the reply only, not the list against the count.
+/// malformed, an unknown outcome, and so is a reply up to the reply cap of
+/// empty strings. The parser checks the bound and the order within the
+/// reply only, not the list against the count.
 #[test]
 fn a_reply_lists_at_most_a_page_of_revoked_ids() {
     let ids = |n: usize| -> Vec<String> {
@@ -1283,17 +1284,26 @@ fn a_reply_lists_at_most_a_page_of_revoked_ids() {
         malformed
     );
     // Out of order or repeated anywhere in the page: the last two swapped,
-    // the first repeated at the end.
+    // the first repeated at the end, the last repeated right after itself.
     let mut swapped = page.clone();
     swapped.swap(998, 999);
     let mut repeated = page[..999].to_vec();
     repeated.push(page[0].clone());
-    for list in [&swapped, &repeated] {
+    let mut twice = page[..999].to_vec();
+    twice.push(page[998].clone());
+    for list in [&swapped, &repeated, &twice] {
         assert_eq!(
             parse_reply(Op::Restore, restored(list).as_bytes()),
             malformed
         );
     }
+    // A reply up to the 4 MiB cap of empty strings: repeated from the
+    // second, read no further than that.
+    let base = restored(&[]).len();
+    let empties = vec![String::new(); (MAX_REPLY_BYTES - base + 1) / 3];
+    let line = restored(&empties);
+    assert!(line.len() <= MAX_REPLY_BYTES && line.len() + 3 > MAX_REPLY_BYTES);
+    assert_eq!(parse_reply(Op::Restore, line.as_bytes()), malformed);
 
     let status = |revoked: &[String]| {
         let mut members = vec![("server_time", Value::from(1))];
@@ -1330,7 +1340,7 @@ fn a_reply_lists_at_most_a_page_of_revoked_ids() {
         parse_reply(Op::Status, status(&page).as_bytes()),
         Ok(Reply::Status(read)) if read.revoked_credential_ids.as_ref() == Some(&page)
     ));
-    for list in [&over, &swapped, &repeated] {
+    for list in [&over, &swapped, &repeated, &twice] {
         assert_eq!(parse_reply(Op::Status, status(list).as_bytes()), malformed);
     }
 }

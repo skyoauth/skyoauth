@@ -508,7 +508,9 @@ fixture pins (F9).
    caller names) and `lock_administrative_operation` (by ID), return the
    full row; no caller exposes an `operator_restoration` row (the D4 reads
    name only the five gated-write kinds; the approval paths refuse that
-   kind via `OperationKind::from_name`)." Today's text is wider than the
+   kind via `OperationKind::from_name`)." (As merged, the contract names a
+   second function, for the restore reply's page; the contract's text
+   governs.) Today's text is wider than the
    code (above). Checked: `operation.rs:430-463`, both public
    (`registry/mod.rs:518-521`, :527); the D4 read passes `kinds_of`, a
    subset of `OperationKind::ALL` (`service/src/operation/read.rs:231-238`,

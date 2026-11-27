@@ -87,7 +87,8 @@ use skyoauth_service::{
         self, PgPool,
         registry::{
             self, AdminRole, AuditActor, ChainVerdict, NewAuditEvent, NewTenant, OperatorRequest,
-            OperatorScope, authorize_operator, get_recovery_state, verify_audit_chain,
+            OperatorScope, StatusError, authorize_operator, get_recovery_state,
+            revoked_by_restoration, verify_audit_chain,
         },
     },
 };
@@ -5124,6 +5125,131 @@ async fn an_unclosed_recovery_state_is_reported_and_its_challenges_are_not() {
             "{id}"
         );
     }
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// With the recovery state row gone (deleted by raw SQL past its
+/// trigger), a recovery challenge is `server_error` whatever its own
+/// state, restored, revoked or issued; an ID that is no challenge is still
+/// `not_found`, and `status` without an operation reports no state.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_missing_recovery_state_leaves_no_challenge_state() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    let t0 = UNIX_EPOCH + T0;
+    bootstrap(&server).await;
+    let (revoked, _) = issue(&server, 2).await;
+    let (restored, challenge) = issue(&server, 3).await;
+    revoke_operation(&pool, &revoked, t0).await;
+    let reply = server
+        .call(signed("restore", &restored, &sign(&SEED, &challenge)))
+        .await;
+    assert_eq!(reply["recovery_key_epoch"], 2, "{reply}");
+    let (issued, _) = issue_with(&server, 4, &public_key(&THIRD_SEED), ANCHOR).await;
+    for (id, state) in [
+        (&revoked, "revoked"),
+        (&restored, "restored"),
+        (&issued, "issued"),
+    ] {
+        let reply = server.call(status_request(Some(id), None, None)).await;
+        assert_eq!(reply["operation_state"], state, "{reply}");
+    }
+    sqlx::raw_sql(
+        "BEGIN; \
+         ALTER TABLE recovery_state DISABLE TRIGGER recovery_state_no_delete; \
+         DELETE FROM recovery_state; \
+         ALTER TABLE recovery_state ENABLE ALWAYS TRIGGER recovery_state_no_delete; \
+         COMMIT",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for id in [&revoked, &restored, &issued] {
+        assert_eq!(
+            server.call(status_request(Some(id), None, None)).await,
+            error("server_error"),
+            "{id}"
+        );
+    }
+    assert_eq!(
+        server
+            .call(status_request(Some("oper_unknown"), None, None))
+            .await,
+        status_reply(t0, &[("operation_state", json!("not_found"))])
+    );
+    assert_eq!(
+        server.call(status_request(None, None, None)).await,
+        status_reply(t0, &[])
+    );
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// An operation of another kind consumed at a restoration's `consumed_at`
+/// (written by raw SQL) is `not_found`, and the read's kind gate leaves it
+/// no count or page: [`revoked_by_restoration`] finds none for it, and
+/// finds the restoration's own.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_consumed_operation_of_another_kind_is_not_found() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    let t0 = UNIX_EPOCH + T0;
+    bootstrap(&server).await;
+    let (restored, challenge) = issue(&server, 2).await;
+    let reply = server
+        .call(signed("restore", &restored, &sign(&SEED, &challenge)))
+        .await;
+    assert_eq!(reply["revoked_credential_count"], 1, "{reply}");
+    insert_operation(
+        &pool,
+        "oper_approval",
+        "approve",
+        "adm_approver",
+        Some(&restored),
+        None,
+        &json!({}),
+        "approved",
+    )
+    .await;
+    let done = sqlx::query(
+        "UPDATE administrative_operation SET revision = revision + 1, consumed_at = \
+         (SELECT consumed_at FROM administrative_operation WHERE id = $2) WHERE id = $1",
+    )
+    .bind("oper_approval")
+    .bind(&restored)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(done.rows_affected(), 1);
+    assert_eq!(
+        server
+            .call(status_request(Some("oper_approval"), None, None))
+            .await,
+        status_reply(
+            t0,
+            &state_and(2, &NEW_SEED, &[("operation_state", json!("not_found"))])
+        )
+    );
+    let mut transaction = pool.begin().await.unwrap();
+    assert!(matches!(
+        revoked_by_restoration(&mut transaction, "oper_approval").await,
+        Err(StatusError::Inconsistent)
+    ));
+    let page = revoked_by_restoration(&mut transaction, &restored)
+        .await
+        .unwrap();
+    assert_eq!(
+        (page.count, page.ids),
+        (1, ids(1, IdKind::AdminCredential, 1))
+    );
+    transaction.rollback().await.unwrap();
     server.stop().await;
     db.drop([pool]).await;
 }
