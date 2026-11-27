@@ -421,8 +421,10 @@ pub enum UnknownOutcome {
     /// The pages of a restore's revoked credential IDs do not hold
     /// together: a page of another length than its count leaves, an ID not
     /// after the one before, a count that changed after the one restart,
-    /// a `status` that does not report the restore
-    /// ([`LocalClient::revoked_credential_ids`]).
+    /// a `status` that does not report the restore; or the list the walk
+    /// ends with is shorter than the largest count seen in the walk (the
+    /// restore reply's included), or lacks an ID of the restore reply's
+    /// list ([`LocalClient::revoked_credential_ids`]).
     PageMismatch,
 }
 

@@ -217,9 +217,9 @@ committed: the mp4 files.
 **Extra dependencies (need the lead's approval at implementation time).** The
 statement "no new crate" holds only for this PR. Implementing the plan needs:
 
-- `skyoauth-operator` as a dev-dependency of `skyoauth-scenarios` (it has none
-  today, and the operator crate does not depend on the service, so the
-  direction is allowed);
+- `skyoauth-operator` as a dev-dependency of `skyoauth-scenarios` (approved by
+  the lead and landed with #214; the operator crate does not depend on the
+  service, so the direction is allowed);
 - npm `playwright` in a new `scripts/demo/package.json` and lockfile, with a
   new Dependabot entry for it (`.github/dependabot.yml` has none for it);
 - a browser and `ffmpeg` on the runner.

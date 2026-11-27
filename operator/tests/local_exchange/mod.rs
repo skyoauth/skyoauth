@@ -2292,6 +2292,29 @@ fn a_restarted_walk_below_the_largest_count_or_without_the_restore_ids_is_unknow
         ),
         PAGE_MISMATCH
     );
+    // Restore 1001, a tie at 1002, then a restart of 1002 IDs (as many as
+    // the largest count seen) that holds the restore reply's first ID but
+    // lacks a later one, cred_00500: each ID of the reply's list is looked
+    // for, not only the first.
+    let without_500: Vec<String> = revoked(0..1001)
+        .into_iter()
+        .filter(|id| id != "cred_00500")
+        .collect();
+    assert_eq!(without_500.len(), MAX_REVOKED_IDS_PER_REPLY);
+    assert_eq!(
+        walked(
+            Some(&restored(1001, 0..1000)),
+            vec![
+                (after(1000), page(1002, 1000..1002)),
+                (
+                    page_request(None),
+                    status_line("restored", Some((1002, &without_500)))
+                ),
+                (page_request(Some("cred_01000")), page(1002, 1001..1003)),
+            ]
+        ),
+        PAGE_MISMATCH
+    );
     // From `status` alone: 1500, then 1499 (a tie), then a restart that
     // reports 3.
     assert_eq!(
