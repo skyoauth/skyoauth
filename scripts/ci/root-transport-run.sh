@@ -92,7 +92,7 @@ skyoauth-scenarios::pg harness::socket_path_fixture::'
 # test functions in the Rust sources (`#[test]`, `#[tokio::test]`) that
 # compile on the runner (Linux on x86_64, `--all-features`), so adding a
 # test means raising its number here, and removing one, lowering it.
-MIN_TESTS='skyoauth-service::local_transport 57
+MIN_TESTS='skyoauth-service::local_transport 69
 skyoauth-operator::operator local_path:: 11
 skyoauth-operator::operator cli::sign::seed_file_protection_on_unix 1
 skyoauth-scenarios::pg harness::socket_path_fixture:: 5'
