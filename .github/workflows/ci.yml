@@ -478,29 +478,43 @@ jobs:
         id: tests
         run: cargo nextest run --locked --workspace --exclude skyoauth-scenarios --all-features --profile ci --run-ignored all
 
-      # The local transport tests that need root and a second local user
-      # (`SKYOAUTH_IT_PEER_USER`: the cross-UID peer check, the bind for
-      # another UID, the swap and rename races, the unlistable directory).
-      # The run above is not root, so those tests print a notice and pass
-      # there; this run gives them the user and root, through the runner's
-      # passwordless sudo (the step fails if there is none), under the
-      # `ci-root` profile (.config/nextest.toml). It runs after a failed
-      # normal run too, so both outcomes show; it does not run when that
-      # run never started. Output is not captured, so a notice a test
-      # prints is in the log; scripts/ci/root-transport-run.sh copies the
-      # output to that log with workflow commands stopped (no test line is
-      # read as one), then writes the job summary: nextest's summary line,
-      # which must say every test ran and passed; every notice, also as an
-      # escaped warning annotation; and the step fails on a notice that
-      # says the peer user is missing. It calls the run complete only when
-      # it passed with no notice, and only for this target: the library's
-      # own root-only tests (in service/src) are not part of it. As root, the user namespace test
-      # runs its namespace as root, which ubuntu-24.04's AppArmor
-      # restriction on unprivileged user namespaces does not cover, so it
-      # cannot show that restriction: the step probes it as the runner user
-      # (`unshare`, the test's own probe) and reports allowed or denied, with
-      # the exit status, in the job summary. The colour is off so that the
-      # summary holds no escape sequences.
+      # The tests that need root and a second local user
+      # (`SKYOAUTH_IT_PEER_USER`), in three selections: the `local_transport`
+      # integration test target of skyoauth-service (the cross-UID peer
+      # check, the bind for another UID, the swap and rename races, the
+      # unlistable directory); the `local_path` module of skyoauth-operator's
+      # `operator` target (the client's socket path checks on the cases with
+      # entries of root or of another UID, and the owner checks); and the
+      # `harness::socket_path_fixture` module of skyoauth-scenarios' `pg`
+      # target (the same cases bound by the service, root's binds for another
+      # UID and, in a child process run as the peer user, the service UID's;
+      # it needs no database, and no other test of `pg` is selected).
+      # The runs that are not root (above, and the `pg` target in
+      # `scenarios-pg`) skip those cases with a notice and pass; this run
+      # gives them the user and root, through the runner's passwordless sudo
+      # (the step fails if there is none), under the `ci-root` profile
+      # (.config/nextest.toml), one nextest run with the filterset below. It
+      # runs after a failed normal run too, so both outcomes show; it does not
+      # run when that run never started. Output is not captured, so a notice
+      # a test prints is in the log; scripts/ci/root-transport-run.sh copies
+      # the output to that log with workflow commands stopped (no test line is
+      # read as one). The same selection is then listed (`cargo nextest
+      # list`, one test per line, the tests outside the filterset marked
+      # skipped), and the script writes the job summary: nextest's summary
+      # line, which must say that exactly the listed tests ran and passed and
+      # that exactly the listed others were skipped; per selection, how many
+      # of its listed tests passed (none listed fails); every notice, also as
+      # an escaped warning annotation; and the step fails on a notice that
+      # says cases did not run for want of root or of the peer user (the
+      # list is in the script). It calls the run complete only when it passed
+      # with no notice, and only for these selections: the library's own
+      # root-only tests (in service/src) are not part of it. As root, the user
+      # namespace test runs its namespace as root, which ubuntu-24.04's
+      # AppArmor restriction on unprivileged user namespaces does not cover,
+      # so it cannot show that restriction: the step probes it as the runner
+      # user (`unshare`, the test's own probe) and reports allowed or denied,
+      # with the exit status, in the job summary. The colour is off so that
+      # the summary holds no escape sequences.
       - name: Run the root-only local transport tests
         id: root
         if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
@@ -510,17 +524,26 @@ jobs:
           peer=skyoauth-peer
           sudo useradd --no-create-home --shell /usr/sbin/nologin "$peer"
           log="$RUNNER_TEMP/local-transport-root.log"
+          list="$RUNNER_TEMP/local-transport-root.list"
           userns=0
           unshare --user --map-root-user --mount true || userns=$?
+          as_root=(sudo env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
+            "CARGO_TERM_COLOR=never" "SKYOAUTH_IT_DATABASE_URL=$SKYOAUTH_IT_DATABASE_URL" "SKYOAUTH_IT_PEER_USER=$peer")
+          # The three selections (SELECTIONS in root-transport-run.sh): the
+          # packages and targets to build, and the filterset that keeps only
+          # these tests of them.
+          selection=(--locked -p skyoauth-service -p skyoauth-operator -p skyoauth-scenarios
+            --test local_transport --test operator --test pg --all-features --profile ci-root --run-ignored all
+            -E '(package(skyoauth-service) & binary(local_transport)) | (package(skyoauth-operator) & binary(operator) & test(/^local_path::/)) | (package(skyoauth-scenarios) & binary(pg) & test(/^harness::socket_path_fixture::/))')
           status=0
           sh scripts/ci/root-transport-run.sh run "$log" \
-            sudo env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
-            "CARGO_TERM_COLOR=never" "SKYOAUTH_IT_DATABASE_URL=$SKYOAUTH_IT_DATABASE_URL" "SKYOAUTH_IT_PEER_USER=$peer" \
-            cargo nextest run --locked -p skyoauth-service --test local_transport --all-features --profile ci-root --run-ignored all --no-capture \
+            "${as_root[@]}" cargo nextest run "${selection[@]}" --no-capture \
             || status=$?
+          listed=0
+          "${as_root[@]}" cargo nextest list "${selection[@]}" --message-format oneline --verbose > "$list" || listed=$?
           # The files the root run wrote belong to root; give them back.
           sudo chown -R "$(id -u):$(id -g)" target
-          sh scripts/ci/root-transport-run.sh summarize "$log" "$userns" "$status" || status=$?
+          sh scripts/ci/root-transport-run.sh summarize "$log" "$userns" "$status" "$list" "$listed" || status=$?
           exit "$status"
 
       # One file per artifact, so each junit.xml is at the top of its

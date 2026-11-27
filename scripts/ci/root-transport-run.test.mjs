@@ -24,27 +24,65 @@ const fresh = (name) => join(TOP, `${++n}-${name}`);
 // The step's two calls; `sh` is the shell the step's `sh` resolves to.
 const sh = (args, opts = {}) => spawnSync('sh', [SCRIPT, ...args], { encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, ...opts });
 
-// Runs `summarize` on a log with this text (null: no log file) and returns
-// { status, stdout, stderr, summary, lines }: `lines` are stdout's lines.
-function summarize(text, userns = '0', status = '0') {
+// The listing `summarize` reads by default: the stdout of `cargo nextest
+// list --message-format oneline --verbose` (nextest 0.9) for a run of the
+// three selections, shortened: the selected tests, then tests of the same
+// binaries that the filterset leaves out, which end in ` (skipped)`.
+const SELECTED = [
+  'skyoauth-operator::operator local_path::socket_path_cases_match_check_socket',
+  'skyoauth-operator::operator local_path::the_socket_must_be_the_expected_owners',
+  'skyoauth-scenarios::pg harness::socket_path_fixture::socket_path_fixture_cases_match_the_services_bind',
+  'skyoauth-service::local_transport a_peer_of_another_uid_is_refused',
+  'skyoauth-service::local_transport the_service_uid_cannot_redirect_a_bind',
+];
+const LEFT_OUT = [
+  'skyoauth-operator::operator challenge::challenge_fixture_envelope_matches_the_crate',
+  'skyoauth-operator::operator identity_bounds_and_form',
+  'skyoauth-scenarios::pg harness::socket_path_fixture_other::a_test',
+];
+const listLine = (t, skipped = false) => {
+  const bin = t.split(' ')[0].split('::')[1];
+  return `${t} [bin: /work/target/debug/deps/${bin}-0123456789abcdef] [cwd: /work/x] [build platform: target]${skipped ? ' (skipped)' : ''}`;
+};
+const listing = (selected = SELECTED, leftOut = LEFT_OUT) => [...selected.map((t) => listLine(t)), ...leftOut.map((t) => listLine(t, true))].map((l) => `${l}\n`).join('');
+const LISTING = listing();
+
+// Runs `summarize` on a log with this text (null: no log file) and a
+// listing (null: no listing file) and returns { status, stdout, stderr,
+// summary, lines }: `lines` are stdout's lines.
+function summarize(text, userns = '0', status = '0', list = LISTING, listStatus = '0') {
   const log = fresh('run.log');
   if (text !== null) writeFileSync(log, text);
+  const listPath = fresh('run.list');
+  if (list !== null) writeFileSync(listPath, list);
   const summary = fresh('summary.md');
   writeFileSync(summary, '# earlier step\n');
-  const r = sh(['summarize', log, userns, status], { env: { ...process.env, GITHUB_STEP_SUMMARY: summary } });
+  const r = sh(['summarize', log, userns, status, listPath, listStatus], { env: { ...process.env, GITHUB_STEP_SUMMARY: summary } });
   return { ...r, summary: readFileSync(summary, 'utf8'), lines: r.stdout.split('\n').filter(Boolean) };
 }
 
 // What nextest 0.9 prints with --no-capture and CARGO_TERM_COLOR=never
-// (the lines the script reads, as in a real run of the local_transport
-// binary as root).
-const START = '    Starting 54 tests across 1 binary\n       START [         ] (1/54) skyoauth-service::local_transport a\n';
-const PASSED = '────────────\n     Summary [  56.610s] 54 tests run: 54 passed, 0 skipped\n';
+// (the lines the script reads, as in a real run of the three selections
+// as root): START and PASS lines (the counter padded as nextest pads it),
+// and the summary line, whose skipped count is the tests the filterset
+// leaves out.
+const START = `    Starting ${SELECTED.length} tests across 3 binaries (${LEFT_OUT.length} tests skipped)\n`;
+const passLines = (tests = SELECTED) => tests.map((t, i) => `       START [         ] (${String(i + 1).padStart(2)}/${tests.length}) ${t}\n        PASS [   0.004s] (${String(i + 1).padStart(2)}/${tests.length}) ${t}\n`).join('');
+const SUMMARY = `Summary [  56.610s] ${SELECTED.length} tests run: ${SELECTED.length} passed, ${LEFT_OUT.length} skipped`;
+const PASSED = `────────────\n     ${SUMMARY}\n`;
 const PEER = 'NOTICE: SKYOAUTH_IT_PEER_USER is not set: the cross-UID peer check was NOT run (it needs root and a second local user; set SKYOAUTH_IT_PEER_USER=<user> to run it)';
 const PROC = 'NOTICE: a bind without /proc was NOT tested: the mount namespace or the mount on /proc was denied (unshare: cannot change root filesystem propagation: Permission denied)';
-const log = (...lines) => `${START}${lines.map((l) => `${l}\n`).join('')}${PASSED}`;
+const log = (...lines) => `${START}${passLines()}${lines.map((l) => `${l}\n`).join('')}${PASSED}`;
+// A log with every PASS line and this summary line (the text after it).
+const withSummary = (line) => `${START}${passLines()}     ${line}\n`;
 const errors = (r) => r.lines.filter((l) => l.startsWith('::error::'));
 const warnings = (r) => r.lines.filter((l) => l.startsWith('::warning::'));
+const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const HEADING = '### Root-only tests: `local_transport`, operator `local_path`, `harness::socket_path_fixture`';
+const COUNTS =
+  '- `skyoauth-service::local_transport`: 2 of 2 selected tests ran and passed\n' +
+  '- `skyoauth-operator::operator` `local_path::*`: 2 of 2 selected tests ran and passed\n' +
+  '- `skyoauth-scenarios::pg` `harness::socket_path_fixture::*`: 1 of 1 selected tests ran and passed\n';
 
 describe('summarize', () => {
   test('no notices and every test passed: passes, and the summary says so', () => {
@@ -53,10 +91,11 @@ describe('summarize', () => {
     assert.deepEqual(r.lines, []);
     assert.equal(
       r.summary,
-      '# earlier step\n### Root-only local transport tests\n\n' +
-        '- nextest: Summary [  56.610s] 54 tests run: 54 passed, 0 skipped\n' +
+      `# earlier step\n${HEADING}\n\n` +
+        `- nextest: ${SUMMARY} (the listing selects 5 tests and leaves out 3 of the same binaries)\n` +
+        COUNTS +
         '- User namespaces for the runner user (not root; `unshare --user --map-root-user --mount true`): allowed (exit 0)\n' +
-        '- Every test of the `local_transport` integration target ran as root and passed, and none printed a notice: each of its root-only checks ran.\n',
+        '- Every selected test ran as root and passed, and none printed a notice: each root-only check of the `local_transport` integration target, of operator `local_path` and of `harness::socket_path_fixture` ran.\n',
     );
   });
 
@@ -67,6 +106,7 @@ describe('summarize', () => {
     for (const bad of ['', 'x', '-1', '1 2']) {
       assert.equal(summarize(log(), bad).status, 2, JSON.stringify(bad));
       assert.equal(summarize(log(), '0', bad).status, 2, JSON.stringify(bad));
+      assert.equal(summarize(log(), '0', '0', LISTING, bad).status, 2, JSON.stringify(bad));
     }
   });
 
@@ -76,7 +116,50 @@ describe('summarize', () => {
     assert.deepEqual(errors(r), ['::error::a test printed a notice about SKYOAUTH_IT_PEER_USER although the step sets it: the root-only cross-UID checks did not run']);
     assert.deepEqual(warnings(r), [`::warning::${PEER}`]);
     assert.match(r.summary, /^- \*\*Failed:\*\* a test printed a notice about SKYOAUTH_IT_PEER_USER/m);
-    assert.match(r.summary, new RegExp(`^- ${PEER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+    assert.match(r.summary, new RegExp(`^- ${escapeRe(PEER)}$`, 'm'));
+  });
+
+  // The notices of operator `local_path` and of the harness module that say
+  // their cases did not run for want of root or of the peer user, as a run
+  // that is not root (or is root without the peer user) prints them.
+  const OPERATOR_ROOT = "NOTICE: 20 of 72 socket path cases were NOT run: they need root (an entry of root or of another UID, or a root-owned case root): ancestor_of_another_uid, ancestor_of_root";
+  const HARNESS_ROOT = "NOTICE: 23 of 72 socket path cases were NOT bound by the service: socket_in_a_sticky_directory_of_root (an entry of root or of another UID), root_only_socket_in_a_directory_of_root (root's bind for another UID)";
+  const HARNESS_PEER = 'NOTICE: 41 of 72 socket path cases were NOT bound by the service: socket_of_root (as root, the peer user)';
+
+  test('a notice that root-only socket path cases did not run fails, each with its own error', () => {
+    for (const [notice, pattern] of [
+      [OPERATOR_ROOT, 'socket path cases were NOT run: they need root'],
+      [HARNESS_ROOT, 'socket path cases were NOT bound by the service'],
+      [HARNESS_PEER, 'socket path cases were NOT bound by the service'],
+    ]) {
+      const r = summarize(log(notice));
+      assert.equal(r.status, 1, notice);
+      assert.deepEqual(errors(r), [`::error::a test printed a notice that its root-only cases did not run (${pattern}) although the step runs as root with SKYOAUTH_IT_PEER_USER set`]);
+      assert.deepEqual(warnings(r), [`::warning::${notice}`]);
+      assert.match(r.summary, /^- \*\*Failed:\*\* a test printed a notice that its root-only cases did not run/m);
+      assert.match(r.summary, new RegExp(`^- ${escapeRe(notice)}$`, 'm'));
+      assert.doesNotMatch(r.summary, COMPLETE);
+    }
+    const all = summarize(log(OPERATOR_ROOT, HARNESS_ROOT, PEER));
+    assert.equal(all.status, 1);
+    assert.equal(errors(all).length, 3, all.stdout);
+    assert.equal(warnings(all).length, 3, all.stdout);
+  });
+
+  test('a notice that does not depend on root or the peer user is a warning and passes, without the completion claim', () => {
+    for (const notice of [
+      'NOTICE: chain_of_40_links: this kernel follows at most 32 symbolic links: expected refused as lookup, not accept',
+      'NOTICE: the working directory is too long for a relative socket path that fits once absolute: that half was NOT tried',
+      "NOTICE: /tmp is not root's and sticky: the owner check was NOT tried as a process that is not root",
+      PROC,
+    ]) {
+      const r = summarize(log(notice));
+      assert.equal(r.status, 0, notice + r.stdout);
+      assert.deepEqual(errors(r), []);
+      assert.deepEqual(warnings(r), [`::warning::${notice}`]);
+      assert.match(r.summary, new RegExp(`^- ${escapeRe(notice)}$`, 'm'));
+      assert.doesNotMatch(r.summary, COMPLETE);
+    }
   });
 
   test('another notice is a warning and in the summary, and passes; repeats are shown once', () => {
@@ -85,7 +168,7 @@ describe('summarize', () => {
     assert.deepEqual(errors(r), []);
     assert.deepEqual(warnings(r), [`::warning::  ${PROC}`, `::warning::${PROC}`]);
     assert.match(r.summary, /Notices printed by tests \(a test that could not run its check\):\n\n- {3}NOTICE: a bind without \/proc.*\n- NOTICE: a bind without \/proc[^\n]*\n$/);
-    assert.doesNotMatch(r.summary, /each of its root-only checks ran/);
+    assert.doesNotMatch(r.summary, COMPLETE);
   });
 
   test('a notice cannot inject a workflow command: %, CR and LF are escaped', () => {
@@ -99,7 +182,7 @@ describe('summarize', () => {
   });
 
   test('an error that quotes the log is escaped too', () => {
-    const r = summarize(`${START}     Summary [   1.000s] 5 tests run: 4 passed %0A::error::injected 50% \r::warning::cr\n`);
+    const r = summarize(withSummary('Summary [   1.000s] 5 tests run: 4 passed %0A::error::injected 50% \r::warning::cr'));
     assert.equal(r.status, 1);
     assert.deepEqual(r.lines, ['::error::not every root-only test ran and passed: Summary [   1.000s] 5 tests run: 4 passed %250A::error::injected 50%25 %0D::warning::cr']);
   });
@@ -122,12 +205,16 @@ describe('summarize', () => {
     assert.equal(warnings(r).length, filler.length + 1);
   });
 
-  const COMPLETE = /each of its root-only checks ran/;
+  const COMPLETE = /each root-only check .* ran/;
 
-  test('a failed build (no notices, a non-zero status, no summary line) is recorded as failed and not called complete', () => {
-    const r = summarize('   Compiling skyoauth-service v0.1.0\nerror[E0425]: cannot find value `x` in this scope\nerror: could not compile `skyoauth-service` (test "local_transport") due to 1 previous error\n', '0', '101');
+  test('a failed build (no notices, a non-zero status, no summary line, no listing) is recorded as failed and not called complete', () => {
+    const r = summarize('   Compiling skyoauth-service v0.1.0\nerror[E0425]: cannot find value `x` in this scope\nerror: could not compile `skyoauth-service` (test "local_transport") due to 1 previous error\n', '0', '101', '', '101');
     assert.equal(r.status, 1);
-    assert.deepEqual(errors(r), ['::error::the root run exited 101', '::error::the root run printed no nextest summary line (`Summary [...] N tests run: ...`)']);
+    assert.equal(errors(r)[0], '::error::the root run exited 101');
+    assert.equal(errors(r)[1], "::error::the listing of the root run's selection (cargo nextest list) exited 101");
+    assert.equal(errors(r)[2], '::error::the root run printed no nextest summary line (`Summary [...] N tests run: ...`)');
+    assert.match(errors(r)[3], /^::error::the listing of the root run's selection is missing or empty /);
+    assert.equal(errors(r).length, 4, r.stdout);
     assert.match(r.summary, /^- \*\*Failed:\*\* the root run exited 101$/m);
     assert.doesNotMatch(r.summary, COMPLETE);
   });
@@ -140,24 +227,28 @@ describe('summarize', () => {
   });
 
   test('no completion claim for a failed summary line, a missing log or a peer notice', () => {
-    for (const r of [summarize(`${START}     Summary [   1.000s] 54 tests run: 53 passed, 1 failed, 0 skipped\n`), summarize(''), summarize(log(PEER))]) {
+    for (const r of [summarize(withSummary('Summary [   1.000s] 5 tests run: 4 passed, 1 failed, 3 skipped')), summarize(''), summarize(log(PEER))]) {
       assert.equal(r.status, 1);
       assert.doesNotMatch(r.summary, COMPLETE);
     }
   });
 
-  test('an empty or missing log fails', () => {
+  test('an empty or missing log fails, and so does every selection, whose tests have no PASS line', () => {
     for (const text of ['', null]) {
       const r = summarize(text);
       assert.equal(r.status, 1, String(text));
-      assert.equal(errors(r).length, 1);
       assert.match(errors(r)[0], /^::error::the root run left no output in /);
+      assert.deepEqual(errors(r).slice(1), [
+        '::error::`skyoauth-service::local_transport`: 0 of its 2 selected tests passed',
+        '::error::`skyoauth-operator::operator` `local_path::*`: 0 of its 2 selected tests passed',
+        '::error::`skyoauth-scenarios::pg` `harness::socket_path_fixture::*`: 0 of its 1 selected tests passed',
+      ]);
       assert.match(r.summary, /^- \*\*Failed:\*\* the root run left no output/m);
     }
   });
 
   test('a log without the nextest summary line fails', () => {
-    for (const text of [START, `${START}test result: ok. 1 passed; 0 failed\n54 tests run: 54 passed\n`, 'error: could not compile `skyoauth-service`\n']) {
+    for (const text of [`${START}${passLines()}`, `${START}${passLines()}test result: ok. 1 passed; 0 failed\n5 tests run: 5 passed\n`]) {
       const r = summarize(text);
       assert.equal(r.status, 1, text);
       assert.deepEqual(errors(r), ['::error::the root run printed no nextest summary line (`Summary [...] N tests run: ...`)']);
@@ -166,31 +257,166 @@ describe('summarize', () => {
 
   test('a summary line that does not show every test run and passed fails', () => {
     for (const line of [
-      'Summary [   1.000s] 54 tests run: 50 passed, 4 failed, 0 skipped',
-      'Summary [   1.000s] 10/54 tests run: 10 passed, 0 skipped',
-      'Summary [   1.000s] 0 tests run: 0 passed, 0 skipped',
-      'Summary [   1.000s] 54 tests run: 54 passed, 3 skipped',
-      'Summary [   1.000s] 54 tests run: 53 passed (1 slow), 1 timed out, 0 skipped',
+      'Summary [   1.000s] 5 tests run: 4 passed, 1 failed, 3 skipped',
+      'Summary [   1.000s] 2/5 tests run: 2 passed, 3 skipped',
+      'Summary [   1.000s] 0 tests run: 0 passed, 3 skipped',
+      'Summary [   1.000s] 5 tests run: 4 passed (1 slow), 1 timed out, 3 skipped',
       'Summary [   1.000s] something else',
     ]) {
-      const r = summarize(`${START}     ${line}\n`);
+      const r = summarize(withSummary(line));
       assert.equal(r.status, 1, line);
       assert.deepEqual(errors(r), [`::error::not every root-only test ran and passed: ${line}`]);
     }
   });
 
-  test('the last summary line counts; one test and a slow test pass', () => {
-    for (const line of ['Summary [   0.100s] 1 test run: 1 passed, 0 skipped', 'Summary [ 120.000s] 54 tests run: 54 passed (2 slow), 0 skipped', 'Summary [   0.100s] 3 tests run: 3 passed']) {
-      const r = summarize(`${START}     Summary [   0.1s] 2 tests run: 1 passed, 1 failed\n     ${line}\n`);
+  // nextest counts the tests of the built binaries that the filterset
+  // leaves out as skipped. That count is tolerated only when it is exactly
+  // the number the listing leaves out, and the run count must be exactly
+  // the number it selects.
+  test('the run and skipped counts must be exactly the listing\'s selected and left-out tests', () => {
+    for (const [line, selected, leftOut] of [
+      ['Summary [   1.000s] 5 tests run: 5 passed, 4 skipped', SELECTED, LEFT_OUT],
+      ['Summary [   1.000s] 5 tests run: 5 passed, 2 skipped', SELECTED, LEFT_OUT],
+      ['Summary [   1.000s] 5 tests run: 5 passed', SELECTED, LEFT_OUT],
+      ['Summary [   1.000s] 5 tests run: 5 passed, 0 skipped', SELECTED, LEFT_OUT],
+      ['Summary [   1.000s] 5 tests run: 5 passed, 3 skipped', SELECTED, []],
+      ['Summary [   1.000s] 6 tests run: 6 passed, 3 skipped', SELECTED, LEFT_OUT],
+      ['Summary [   1.000s] 4 tests run: 4 passed, 3 skipped', SELECTED, LEFT_OUT],
+    ]) {
+      const r = summarize(withSummary(line), '0', '0', listing(selected, leftOut));
+      assert.equal(r.status, 1, line);
+      const run = /(\d+) tests run/.exec(line)[1];
+      const skipped = /(\d+) skipped/.exec(line)?.[1] ?? '0';
+      assert.deepEqual(errors(r), [`::error::nextest ran ${run} tests and skipped ${skipped}, but the listing selects ${selected.length} and leaves out ${leftOut.length}: ${line}`]);
+      assert.doesNotMatch(r.summary, COMPLETE);
+    }
+    // No test left out and none skipped, with or without the count.
+    for (const line of ['Summary [   0.100s] 5 tests run: 5 passed, 0 skipped', 'Summary [   0.100s] 5 tests run: 5 passed']) {
+      const r = summarize(withSummary(line), '0', '0', listing(SELECTED, []));
       assert.equal(r.status, 0, line + r.stdout);
-      assert.match(r.summary, new RegExp(`^- nextest: ${line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+      assert.match(r.summary, /the listing selects 5 tests and leaves out 0 of the same binaries/);
     }
   });
 
-  test('every failure is reported, not only the first', () => {
-    const r = summarize(`${START}${PEER}\n     Summary [   1.000s] 54 tests run: 53 passed, 1 failed, 0 skipped\n`);
+  test('only the listing\'s ` (skipped)` mark leaves a test out, not the word in its name', () => {
+    const selected = [...SELECTED, 'skyoauth-service::local_transport a_bind_is_never_skipped'];
+    const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] 6 tests run: 6 passed, 3 skipped\n`, '0', '0', listing(selected));
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.summary, /^- `skyoauth-service::local_transport`: 3 of 3 selected tests ran and passed$/m);
+  });
+
+  test('the last summary line counts; a slow test passes', () => {
+    for (const line of [SUMMARY, `Summary [ 120.000s] 5 tests run: 5 passed (2 slow), 3 skipped`]) {
+      const r = summarize(`${START}${passLines()}     Summary [   0.1s] 2 tests run: 1 passed, 1 failed\n     ${line}\n`);
+      assert.equal(r.status, 0, line + r.stdout);
+      assert.match(r.summary, new RegExp(`^- nextest: ${escapeRe(line)} \\(the listing`, 'm'));
+    }
+  });
+
+  test('a selection the listing has no test of fails', () => {
+    for (const [gone, name] of [
+      ['skyoauth-scenarios::pg ', '`skyoauth-scenarios::pg` `harness::socket_path_fixture::*`'],
+      ['skyoauth-operator::operator ', '`skyoauth-operator::operator` `local_path::*`'],
+      ['skyoauth-service::local_transport ', '`skyoauth-service::local_transport`'],
+    ]) {
+      const selected = SELECTED.filter((t) => !t.startsWith(gone));
+      const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, 3 skipped\n`, '0', '0', listing(selected));
+      assert.equal(r.status, 1, gone);
+      assert.deepEqual(errors(r), [`::error::the listing selects no test of ${name}`]);
+      assert.match(r.summary, new RegExp(`^- ${escapeRe(name)}: 0 of 0 selected tests ran and passed$`, 'm'));
+      assert.doesNotMatch(r.summary, COMPLETE);
+    }
+  });
+
+  test('a selected test without a PASS line fails its selection, even when the counts agree', () => {
+    const missing = SELECTED[1];
+    const text = `${START}${passLines(SELECTED.filter((t) => t !== missing))}        PASS [   0.004s] ( 9/5) skyoauth-operator::operator local_path::another_test\n${PASSED}`;
+    const r = summarize(text);
     assert.equal(r.status, 1);
-    assert.equal(errors(r).length, 2);
+    assert.deepEqual(errors(r), ['::error::`skyoauth-operator::operator` `local_path::*`: 1 of its 2 selected tests passed']);
+    // A FAIL line is no PASS line.
+    const failed = summarize(`${START}${passLines(SELECTED.slice(1))}        FAIL [   0.004s] ( 1/5) ${SELECTED[0]}\n${PASSED}`);
+    assert.deepEqual(errors(failed), ['::error::`skyoauth-operator::operator` `local_path::*`: 1 of its 2 selected tests passed']);
+  });
+
+  test('a listing that selects a test outside the three selections fails', () => {
+    const outside = [
+      'skyoauth-scenarios::pg a01_a_scenario_that_needs_the_database',
+      'skyoauth-operator::operator local_path_other::a_test',
+      'skyoauth-scenarios::pg harness::socket_path_fixture_other::a_test',
+      'skyoauth-service::local_wire a_test',
+    ];
+    for (const t of outside) {
+      const selected = [...SELECTED, t];
+      const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] 6 tests run: 6 passed, 3 skipped\n`, '0', '0', listing(selected));
+      assert.equal(r.status, 1, t);
+      assert.deepEqual(errors(r), [`::error::the filterset selects tests outside the three selections: 1 (${t})`]);
+    }
+    const many = Array.from({ length: 7 }, (_, i) => `skyoauth-scenarios::pg a0${i}_x`);
+    const r = summarize(`${START}${passLines([...SELECTED, ...many])}     Summary [   1.000s] 12 tests run: 12 passed, 3 skipped\n`, '0', '0', listing([...SELECTED, ...many]));
+    assert.deepEqual(errors(r), [`::error::the filterset selects tests outside the three selections: 7 (${many.slice(0, 5).join(', ')}, ...)`]);
+  });
+
+  test('a failed, missing, empty or malformed listing fails', () => {
+    const failed = summarize(log(), '0', '0', LISTING, '1');
+    assert.equal(failed.status, 1);
+    assert.deepEqual(errors(failed), ["::error::the listing of the root run's selection (cargo nextest list) exited 1"]);
+    for (const list of [null, '']) {
+      const r = summarize(log(), '0', '0', list);
+      assert.equal(r.status, 1, String(list));
+      assert.equal(errors(r).length, 1, r.stdout);
+      assert.match(errors(r)[0], /^::error::the listing of the root run's selection is missing or empty \(/);
+      assert.doesNotMatch(r.summary, COMPLETE);
+    }
+    const bad = summarize(log(), '0', '0', `    Finished \`test\` profile\n${LISTING}`);
+    assert.equal(bad.status, 1);
+    assert.deepEqual(errors(bad), ['::error::the listing holds a line that is not `BINARY-ID TEST ...`:     Finished `test` profile']);
+  });
+
+  test('every failure is reported, not only the first', () => {
+    const r = summarize(`${START}${passLines(SELECTED.slice(1))}${PEER}\n     Summary [   1.000s] 5 tests run: 4 passed, 1 failed, 3 skipped\n`);
+    assert.equal(r.status, 1);
+    assert.equal(errors(r).length, 3, r.stdout);
+  });
+
+  // Every NOTICE the three selections' sources print, through `summarize`:
+  // each is one of the two kinds the script's comment lists, so that a
+  // notice added or reworded there is classified here before it can pass
+  // as a warning where it should fail the step (or the reverse).
+  test('each NOTICE of the selections\' sources fails or warns as the script documents', () => {
+    const KINDS = [
+      ['SKYOAUTH_IT_PEER_USER is not set', 'fails'],
+      ['socket path cases were NOT run: they need root', 'fails'],
+      ['socket path cases were NOT bound by the service', 'fails'],
+      ['this kernel follows at most', 'warns'],
+      ["is not root's and sticky: the owner check was NOT tried", 'warns'],
+      ['the working directory is too long for a relative socket path', 'warns'],
+      ['/proc/self/fd is missing', 'warns'],
+      ['a bind without /proc was NOT tested', 'warns'],
+      ['a user namespace was denied', 'warns'],
+    ];
+    const notices = [];
+    for (const file of ['service/tests/local_transport.rs', 'operator/tests/local_path/mod.rs', 'tests/harness/socket_path_fixture.rs']) {
+      const source = readFileSync(join(REPO, file), 'utf8');
+      const consts = Object.fromEntries([...source.matchAll(/^const (\w+): (?:&str = "([^"]*)"|\w+ = (\d+));$/gm)].map((m) => [m[1], m[2] ?? m[3]]));
+      const found = [...source.matchAll(/"(NOTICE:(?:[^"\\]|\\.)*)"/gs)].map((m) => m[1].replace(/\\\n\s*/g, '').replace(/\{(\w*)[^}]*\}/g, (_, name) => consts[name] ?? 'X'));
+      assert.ok(found.length > 0, `${file}: no NOTICE`);
+      notices.push(...found.map((n) => [file, n]));
+    }
+    for (const [pattern] of KINDS) assert.ok(notices.some(([, n]) => n.includes(pattern)), `no source prints a notice with ${JSON.stringify(pattern)}`);
+    for (const [file, notice] of notices) {
+      const kinds = KINDS.filter(([pattern]) => notice.includes(pattern));
+      assert.equal(kinds.length, 1, `${file}: ${notice}: not classified (or twice); add it to the script's comment and here`);
+      const r = summarize(log(notice));
+      assert.deepEqual(warnings(r), [`::warning::${notice}`], notice);
+      assert.equal(r.status, kinds[0][1] === 'fails' ? 1 : 0, `${file}: ${notice} ${kinds[0][1]}\n${r.stdout}`);
+    }
+  });
+
+  test('the script documents each notice kind and lists the failing ones in NOTICE_FAILS', () => {
+    const source = readFileSync(SCRIPT, 'utf8');
+    const fails = /^NOTICE_FAILS='([^']*)'$/m.exec(source)?.[1].split('\n');
+    assert.deepEqual(fails, ['SKYOAUTH_IT_PEER_USER', 'socket path cases were NOT run: they need root', 'socket path cases were NOT bound by the service']);
   });
 });
 
@@ -444,6 +670,20 @@ const upload = (step) => {
   return { name, paths, if: /^ {8}if: (.+)$/m.exec(step)?.[1] };
 };
 
+// The script's SELECTIONS, as [binary ID, test name prefix] pairs.
+const SELECTIONS = /^SELECTIONS='([^']*)'$/m
+  .exec(readFileSync(SCRIPT, 'utf8'))[1]
+  .split('\n')
+  .map((l) => [l.split(' ')[0], l.split(' ')[1] ?? '']);
+// The step's `selection=(...)` array: its flags before `-E`, and the
+// filterset after it (one single-quoted word).
+const selectionOf = (run) => {
+  const m = /^ {10}selection=\(((?:[^)']|'[^']*')*)\)$/m.exec(run);
+  if (!m) return undefined;
+  const [flags, filter] = m[1].split(/\s+-E\s+/);
+  return { flags: flags.trim().split(/\s+/), filter: /^'([^']*)'$/.exec(filter?.trim() ?? '')?.[1] };
+};
+
 const problems = (ci) => {
   const out = [];
   const job = jobOf(ci, 'service-nextest');
@@ -475,9 +715,22 @@ const problems = (ci) => {
   const run = root.slice(root.indexOf('        run: |\n'));
   if (!/^ {10}set -euo pipefail$/m.test(run)) out.push('the root step does not set -euo pipefail');
   if (!/^ {10}sh scripts\/ci\/root-transport-run\.sh run "\$log" \\$/m.test(run)) out.push('the root step does not run the tests through root-transport-run.sh run');
-  if (!/^ {10}sh scripts\/ci\/root-transport-run\.sh summarize "\$log" "\$userns" "\$status" \|\| status=\$\?$/m.test(run)) out.push('the root step does not call root-transport-run.sh summarize with the run\'s status');
+  if (!/^ {10}sh scripts\/ci\/root-transport-run\.sh summarize "\$log" "\$userns" "\$status" "\$list" "\$listed" \|\| status=\$\?$/m.test(run)) out.push('the root step does not call root-transport-run.sh summarize with the run\'s status and the listing');
   if (!/"CARGO_TERM_COLOR=never"/.test(run) || /CARGO_TERM_COLOR=\$/.test(run)) out.push('the root run does not set CARGO_TERM_COLOR=never');
-  if (!/cargo nextest run --locked -p skyoauth-service --test local_transport --all-features --profile ci-root --run-ignored all --no-capture/.test(run)) out.push('the root run is not the local_transport binary under the ci-root profile with --no-capture');
+  if (!/^ {12}"\$\{as_root\[@\]\}" cargo nextest run "\$\{selection\[@\]\}" --no-capture \\$/m.test(run)) out.push('the root run is not the selection, as root, with --no-capture');
+  if (!/^ {10}"\$\{as_root\[@\]\}" cargo nextest list "\$\{selection\[@\]\}" --message-format oneline --verbose > "\$list" \|\| listed=\$\?$/m.test(run)) out.push('the selection is not listed as root, one test per line, into $list');
+  if (!/^ {10}as_root=\(sudo env .*"SKYOAUTH_IT_PEER_USER=\$peer"\)$/m.test(run.replace(/\n {12}(?=")/g, ' '))) out.push('as_root does not run as root with SKYOAUTH_IT_PEER_USER');
+  const selection = selectionOf(run);
+  if (!selection) out.push('no selection array');
+  else {
+    const want = SELECTIONS.map(([bin, prefix]) => {
+      const [pkg, target] = bin.split('::');
+      return `(package(${pkg}) & binary(${target})${prefix ? ` & test(/^${prefix}/)` : ''})`;
+    });
+    if (selection.filter !== want.join(' | ')) out.push(`the filterset ${JSON.stringify(selection.filter)} is not the script's SELECTIONS ${JSON.stringify(want.join(' | '))}`);
+    const flags = ['--locked', ...SELECTIONS.flatMap(([bin]) => ['-p', bin.split('::')[0]]), ...SELECTIONS.flatMap(([bin]) => ['--test', bin.split('::')[1]]), '--all-features', '--profile', 'ci-root', '--run-ignored', 'all'];
+    if (JSON.stringify(selection.flags) !== JSON.stringify(flags)) out.push(`the selection's flags ${JSON.stringify(selection.flags)} are not ${JSON.stringify(flags)}`);
+  }
   if (!/^ {10}unshare --user --map-root-user --mount true \|\| userns=\$\?$/m.test(run)) out.push('the user namespace probe is missing or runs as root');
   if (/\|\s*grep\s+(-\w*\s+)*-\w*q/.test(run)) out.push('a pipe into grep -q under pipefail');
   if (/::(warning|error|notice)::\$/.test(run)) out.push('an annotation with an unescaped variable');
@@ -508,6 +761,20 @@ describe('the service-nextest job in ci.yml', () => {
       [(b) => b.replace("if: ${{ always() && steps.root.outcome != 'skipped' }}", 'if: always()'), /uploads/],
       [(b) => b.replace(/(service-nextest-root-junit-.*\n.*\n {10}if-no-files-found: )warn/, '$1ignore'), /service-nextest-root-junit-.* does not warn/],
       [(b) => b.replace('summarize "$log" "$userns" "$status"', 'summarize "$log" "$userns" 0'), /with the run's status/],
+      [(b) => b.replace('"$status" "$list" "$listed" ||', '"$status" "$list" 0 ||'), /and the listing/],
+      // The selection: widened to the whole `pg` target (its database
+      // scenarios), narrowed to one selection, or out of step with SELECTIONS.
+      [(b) => b.replace(' & test(/^harness::socket_path_fixture::/)', ''), /is not the script's SELECTIONS/],
+      [(b) => b.replace(/ \| \(package\(skyoauth-scenarios\)[^']*/, ''), /is not the script's SELECTIONS/],
+      [(b) => b.replace('test(/^local_path::/)', 'test(/^local_path/)'), /is not the script's SELECTIONS/],
+      [(b) => b.replace(' -p skyoauth-scenarios', ''), /the selection's flags/],
+      [(b) => b.replace(' --test pg', ''), /the selection's flags/],
+      [(b) => b.replace('--all-features --profile ci-root --run-ignored all\n', '--profile ci-root --run-ignored all\n'), /the selection's flags/],
+      [(b) => b.replace('"${selection[@]}" --no-capture', '"${selection[@]}"'), /with --no-capture/],
+      [(b) => b.replace('cargo nextest run "${selection[@]}"', 'cargo nextest run --locked -p skyoauth-service --test local_transport'), /the selection, as root/],
+      [(b) => b.replace('"${as_root[@]}" cargo nextest list', 'cargo nextest list'), /listed as root/],
+      [(b) => b.replace(' --message-format oneline --verbose', ''), /one test per line/],
+      [(b) => b.replace(' "SKYOAUTH_IT_PEER_USER=$peer")', ')'), /SKYOAUTH_IT_PEER_USER/],
     ];
     for (const [f, re] of cases) {
       const changed = inJob(f);
