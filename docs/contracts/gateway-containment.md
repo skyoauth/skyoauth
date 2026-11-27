@@ -519,7 +519,8 @@ remains necessary (design §4.2; tasks T50.4).
   bundle, and a distinct second `security_admin` MUST approve it unless an
   explicit audited instance policy (`single_actor_mode`, identity-registry
   IR-053) lets one actor do both, who holds `security_admin` as the
-  preparer. Its admin endpoints
+  preparer (the lead decision extending Q4's rule to this flow, user-confirmed
+  2026-11-27). Its admin endpoints
   and issuer-host `begin` and `cleanup_to_closed` semantics are open
   (OQ-GW-15). (design §4.2; tasks T14.5, T14.9; lead decision, OQ-GW-12)
 
