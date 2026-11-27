@@ -388,9 +388,32 @@ impl<C: Connector> LocalClient<C> {
     /// `M`'s, is [`UnknownOutcome::ChallengeMismatch`];
     /// [`Retry::ReconcileFirst`].
     pub fn issue_challenge(&self, request: &IssueChallengeRequest) -> Result<Challenge, CallError> {
+        self.issue_challenge_verbatim(request)
+            .map(|issued| issued.challenge)
+    }
+
+    /// Issues a recovery challenge as [`LocalClient::issue_challenge`]
+    /// does, and also gives the reply line exactly as the server sent it
+    /// (lead ruling Q6, `docs/proposals/operator-cli-online.md`: the
+    /// challenge artifact is the reply, verbatim). The line is given only
+    /// with a success: once it was read in full, parsed as an issue's reply
+    /// and its challenge checked, so it is the bytes [`parse_reply`] and
+    /// [`parse_challenge`] accepted, its newline included.
+    ///
+    /// # Errors
+    ///
+    /// As [`LocalClient::issue_challenge`]: no line is given with an
+    /// error.
+    pub fn issue_challenge_verbatim(
+        &self,
+        request: &IssueChallengeRequest,
+    ) -> Result<IssuedChallenge, CallError> {
         fits(request.encoded_len_lower_bound())?;
-        match self.call(&Request::IssueChallenge(request.clone()))? {
-            Reply::Issued(reply) => challenge_of(&reply),
+        match self.exchange(&Request::IssueChallenge(request.clone()))? {
+            (Reply::Issued(reply), line) => Ok(IssuedChallenge {
+                challenge: challenge_of(&reply)?,
+                line,
+            }),
             _ => Err(CallError::Unknown(UnknownOutcome::Malformed)),
         }
     }
@@ -449,6 +472,13 @@ impl<C: Connector> LocalClient<C> {
     /// typed calls check [`fits`] first, so a value too large is refused
     /// before it is copied into `request`.
     fn call(&self, request: &Request) -> Result<Reply, CallError> {
+        self.exchange(request).map(|(reply, _)| reply)
+    }
+
+    /// [`LocalClient::call`], with the reply line read: on a success, the
+    /// bytes [`parse_reply`] accepted, which are one line and its newline
+    /// and nothing after.
+    fn exchange(&self, request: &Request) -> Result<(Reply, Vec<u8>), CallError> {
         let op = request.op();
         let line = request.encode()?;
         let Timeouts { total, idle } = self.timeouts;
@@ -484,9 +514,28 @@ impl<C: Connector> LocalClient<C> {
             // believed.
             other => match received.lost {
                 Some(kind) => Err(CallError::Unknown(UnknownOutcome::ConnectionLost(kind))),
-                None => other,
+                None => other.map(|reply| (reply, received.reply)),
             },
         }
+    }
+}
+
+/// The success of [`LocalClient::issue_challenge_verbatim`]: the challenge
+/// and the reply line it came in, exactly as the server sent it.
+///
+/// `Debug` prints `IssuedChallenge(..)`, none of the values.
+#[derive(Clone, PartialEq, Eq)]
+pub struct IssuedChallenge {
+    /// The reply's `M`, read with [`parse_challenge`], whose operation ID,
+    /// expiry and expected revision are the reply's.
+    pub challenge: Challenge,
+    /// The reply line, its newline included: the bytes read, unchanged.
+    pub line: Vec<u8>,
+}
+
+impl fmt::Debug for IssuedChallenge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IssuedChallenge(..)")
     }
 }
 

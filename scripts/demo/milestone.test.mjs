@@ -10,13 +10,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { MAX_CHAPTER_CHARS, checkMilestone, joinJourneys, main, parseManifest, readNoFollow, secretsFromFile, validateTranscript } from './transcript.mjs';
+import { MAX_CHAPTER_CHARS, MAX_MANIFEST_BYTES, MAX_RECORD_BYTES, MAX_REPORTED_ENTRIES, checkMilestone, joinJourneys, main, parseManifest, printableName, readNoFollow, secretsFromFile, validateTranscript } from './transcript.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'transcript.mjs');
@@ -186,7 +186,7 @@ describe('the join (§6.3)', () => {
       'm1a-1.jsonl': `${sampleLines('m1a-1.jsonl').join('\n')}\n${line(last - 1, 'output', `token ${a}`)}\n`,
       'm1a-2.jsonl': journey('M1a-2: SAMPLE second', ['output', `${b} end`]),
     });
-    assert.deepEqual(problemsOf(dir), [`m1a-2.jsonl:2: JWT-shaped string across the records on m1a-1.jsonl:${last} - m1a-2.jsonl:2 (texts joined)`]);
+    assert.deepEqual(problemsOf(dir), [`m1a-2.jsonl:2: JWT-shaped string across the records on m1a-1.jsonl:${last} - m1a-2.jsonl:2 (chapters removed)`]);
   });
 
   it('builds the joined passes from every parsed record: one invalid in its file still takes part', () => {
@@ -198,7 +198,7 @@ describe('the join (§6.3)', () => {
     assert.deepEqual(problemsOf(dir), [
       `m1a-1.jsonl:${last}: not in canonical form: keys step, type, text (then allow, if any) in that order, no spaces, no duplicate keys, JSON.stringify escaping`,
       `m1a-1.jsonl:${last}: timestamp-like value (time of day) in "text"`,
-      `m1a-2.jsonl:2: JWT-shaped string across the records on m1a-1.jsonl:${last} - m1a-2.jsonl:2 (texts joined)`,
+      `m1a-2.jsonl:2: JWT-shaped string across the records on m1a-1.jsonl:${last} - m1a-2.jsonl:2 (chapters removed)`,
     ]);
     assert.equal(checkMilestone(dir).joined, null);
   });
@@ -321,8 +321,10 @@ describe('names and manifest (§6.2)', () => {
   it('refuses a missing manifest, a missing listed file and an unlisted file', () => {
     assert.deepEqual(problemsOf(milestone({ 'milestone.json': null })), ['milestone.json: missing: a milestone directory holds its manifest']);
     assert.deepEqual(problemsOf(milestone({ 'm1a-2.jsonl': null })), ['m1a-2.jsonl: missing: milestone.json lists M1a-2']);
-    for (const name of ['notes.txt', 'm1a-3.jsonl', '.gitkeep', 'README.md']) {
-      assert.deepEqual(problemsOf(milestone({ [name]: journey('M1a-3: SAMPLE third') })), [`${name}: not listed in milestone.json: a milestone directory holds only its manifest and the files of the journeys it lists`], name);
+    // A journey file name is printed; any other name by its place in the
+    // sorted listing (m1a-1.jsonl, m1a-2.jsonl, milestone.json and it).
+    for (const [name, shownAs] of [['m1a-3.jsonl', 'm1a-3.jsonl'], ['notes.txt', '<entry 4>'], ['.gitkeep', '<entry 1>'], ['README.md', '<entry 1>']]) {
+      assert.deepEqual(problemsOf(milestone({ [name]: journey('M1a-3: SAMPLE third') })), [`${shownAs}: not listed in milestone.json: a milestone directory holds only its manifest and the files of the journeys it lists`], name);
     }
   });
 
@@ -330,8 +332,8 @@ describe('names and manifest (§6.2)', () => {
     const dir = milestone({ 'm1a-2.jsonl': null, 'M1a-2.jsonl': readFileSync(join(SAMPLE_M1A, 'm1a-2.jsonl')) });
     assert.deepEqual(problemsOf(dir), [
       'm1a-2.jsonl: missing: milestone.json lists M1a-2',
-      'M1a-2.jsonl: not listed in milestone.json: a milestone directory holds only its manifest and the files of the journeys it lists',
-      'M1a-2.jsonl:1: the chapter names journey M1a-2, whose file is m1a-2.jsonl, not this one',
+      '<entry 1>: not listed in milestone.json: a milestone directory holds only its manifest and the files of the journeys it lists',
+      '<entry 1>:1: the chapter names journey M1a-2, whose file is m1a-2.jsonl, not this one',
     ]);
     // The chapter must name the file's journey.
     assert.deepEqual(problemsOf(milestone({ 'm1a-2.jsonl': journey('M1a-1: SAMPLE twice', ['caption', 'SAMPLE']) })), ["m1a-2.jsonl:1: the chapter names journey M1a-1, not this file's M1a-2"]);
@@ -349,7 +351,7 @@ describe('names and manifest (§6.2)', () => {
     mkdirSync(join(dir, 'nested'));
     assert.deepEqual(problemsOf(dir), [
       'm1a-3.jsonl: a nested directory: a milestone directory holds only milestone.json and its journey files',
-      'nested: a nested directory: a milestone directory holds only milestone.json and its journey files',
+      '<entry 5>: a nested directory: a milestone directory holds only milestone.json and its journey files',
     ]);
   });
 
@@ -388,9 +390,9 @@ describe('names and manifest (§6.2)', () => {
     assert.deepEqual(problemsOf(dir), [
       `${M}missing key "milestone"`,
       `${M}missing key "journeys"`,
-      'other.jsonl: neither milestone.json nor a journey file (<lower-case journey id>.jsonl)',
+      '<entry 4>: neither milestone.json nor a journey file (<lower-case journey id>.jsonl)',
       'm1a-2.jsonl:2: JWT-shaped string in "text"',
-      'other.jsonl:1: a journey file of a milestone opens with its chapter, at step 0',
+      '<entry 4>:1: a journey file of a milestone opens with its chapter, at step 0',
     ]);
     const r = checkMilestone(dir);
     assert.equal(r.files, 3);
@@ -460,7 +462,7 @@ describe('check-milestone CLI', () => {
     const r = cli(['check-milestone', '--secret-env', 'DUMMY', bad, good], { DUMMY: SECRET_ENV });
     assert.equal(r.status, 1);
     const printed = r.stdout + r.stderr;
-    assert.ok(printed.includes(`${good}/m1a-2.jsonl:2: JWT-shaped string across the records on m1a-1.jsonl:2 - m1a-2.jsonl:2 (texts joined)`), printed);
+    assert.ok(printed.includes(`${good}/m1a-2.jsonl:2: JWT-shaped string across the records on m1a-1.jsonl:2 - m1a-2.jsonl:2 (chapters removed)`), printed);
     assert.ok(printed.includes(`${good}/m1a-2.jsonl:1: Bearer credential across the chapter titles on m1a-1.jsonl:1 - m1a-2.jsonl:1 (titles joined)`), printed);
     assert.ok(printed.includes(`${bad}/<entry `), printed);
     for (const needle of [JWT, JWT.slice(0, 16), b, SECRET_ENV, SECRET_ENV.slice(0, 12), SECRET_KEY, 'SECRETNAME77', 'eyJsecretid']) {
@@ -472,5 +474,289 @@ describe('check-milestone CLI', () => {
 describe('the sample directory', () => {
   it('holds the sample transcript and the sample milestone only', () => {
     assert.deepEqual(readdirSync(join(HERE, 'sample')).sort(), ['m1a', 'sample.transcript.jsonl']);
+  });
+});
+
+// Review follow-ups of #219 (the lead's items and the automated review).
+const ESC = String.fromCharCode(27);
+const CR = String.fromCharCode(13);
+const LF = String.fromCharCode(10);
+const RLO = String.fromCharCode(0x202e);
+const cliRun = (args, { env = {}, cwd } = {}) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', cwd, env: { PATH: process.env.PATH, ...env } });
+
+// An output record of exactly `bytes` bytes as a line of a journey file at
+// `step`: lines of 100 characters, the last one padded (at most 120).
+function outputOfBytes(step, bytes) {
+  const size = (t) => Buffer.byteLength(line(step, 'output', t));
+  let text = 'y';
+  let last = 1;
+  while (size(text) < bytes) {
+    if (last >= 100 && bytes - size(text) >= 3) {
+      text += `${LF}y`;
+      last = 1;
+    } else {
+      text += 'y';
+      last++;
+    }
+  }
+  assert.equal(size(text), bytes);
+  return line(step, 'output', text);
+}
+
+describe('the joined stream in milestone mode (lead item 1)', () => {
+  // m1a-1: its chapter and 11 captions; m1a-2: its chapter, then a record
+  // of `bytes` bytes at step 1, which the join renumbers to step 13.
+  const capDir = (bytes) =>
+    milestone({
+      'm1a-1.jsonl': journey('M1a-1: SAMPLE first', ...Array.from({ length: 11 }, (_, i) => ['caption', `SAMPLE ${i}`])),
+      'm1a-2.jsonl': `${line(0, 'chapter', 'M1a-2: SAMPLE second')}\n${outputOfBytes(1, bytes)}\n`,
+    });
+
+  it(`refuses a record that renumbering pushes over ${MAX_RECORD_BYTES} bytes, at its file and line`, () => {
+    const dir = capDir(MAX_RECORD_BYTES);
+    // Alone, each file is valid.
+    for (const f of ['m1a-1.jsonl', 'm1a-2.jsonl']) assert.deepEqual(validateTranscript(readFileSync(join(dir, f))).errors, [], f);
+    assert.deepEqual(problemsOf(dir), [`m1a-2.jsonl:2: record longer than ${MAX_RECORD_BYTES} bytes (in the joined milestone stream, as step 13)`]);
+    assert.equal(checkMilestone(dir).joined, null);
+  });
+
+  it('accepts the same record one byte shorter', () => {
+    const r = checkMilestone(capDir(MAX_RECORD_BYTES - 1));
+    assert.deepEqual(r.problems, []);
+    assert.equal(r.joined[13].step, 13);
+  });
+
+  it('when a file has errors, still checks the pair across the boundary from every parsed record', () => {
+    const dir = milestone({ 'm1a-1.jsonl': journey('M1a-1: SAMPLE first', ['caption', 'at 10:15:00'], ['output', `sig: ${B64.slice(0, 84)}`]) });
+    assert.deepEqual(problemsOf(dir), [
+      'm1a-1.jsonl:2: timestamp-like value (time of day) in "text"',
+      'm1a-2.jsonl:1: base64url run of 86 or more characters (signature-sized) across the records on m1a-1.jsonl:3 - m1a-2.jsonl:1 (texts joined)',
+    ]);
+  });
+
+  it('tells the joined pass "(texts joined)" from the chapter-stripped pass "(chapters removed)"', () => {
+    const [a, b] = [JWT.slice(0, 33), JWT.slice(33)];
+    const joinedPass = problemsOf(milestone({ 'm1a-1.jsonl': journey('M1a-1: SAMPLE first', ['output', `sig: ${B64.slice(0, 84)}`]) }));
+    const strippedPass = problemsOf(milestone({ 'm1a-1.jsonl': journey('M1a-1: SAMPLE first', ['output', `token ${a}`]), 'm1a-2.jsonl': journey('M1a-2: SAMPLE second', ['output', b]) }));
+    assert.equal(joinedPass.length, 1);
+    assert.equal(strippedPass.length, 1);
+    assert.match(joinedPass[0], / \(texts joined\)$/);
+    assert.match(strippedPass[0], / \(chapters removed\)$/);
+  });
+});
+
+describe('the manifest\'s limits (lead items 2 and 3)', () => {
+  const M = 'milestone.json: ';
+
+  it('reports a manifest too deeply nested to read, without echoing it, and goes on to the next directory', () => {
+    const deep = `{"milestone":"M1a","journeys":${'['.repeat(30000)}`;
+    assert.deepEqual(parseManifest(Buffer.from(deep)), { problems: ['too deeply nested to read: a manifest is one object holding a list'] });
+    const dir = milestone({ 'milestone.json': deep });
+    assert.deepEqual(problemsOf(dir), [`${M}too deeply nested to read: a manifest is one object holding a list`]);
+    const r = cliRun(['check-milestone', dir, SAMPLE_M1A]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /2 director\(ies\), 4 journey file\(s\), 20 valid record\(s\), 1 director\(ies\) with errors/);
+    assert.ok(!r.stderr.includes('[[[['), r.stderr.slice(0, 500));
+  });
+
+  it(`reads a manifest of up to ${MAX_MANIFEST_BYTES} bytes, and refuses a larger one unread`, () => {
+    const body = JSON.stringify({ milestone: 'M1a', journeys: ['M1a-1', 'M1a-2'] });
+    const padded = (n) => body + ' '.repeat(n - body.length);
+    assert.deepEqual(problemsOf(milestone({ 'milestone.json': padded(MAX_MANIFEST_BYTES) })), []);
+    const too = `${M}larger than ${MAX_MANIFEST_BYTES} bytes (64 KiB): a manifest lists journey ids only`;
+    assert.deepEqual(problemsOf(milestone({ 'milestone.json': padded(MAX_MANIFEST_BYTES + 1) })), [too]);
+    assert.deepEqual(parseManifest(Buffer.from(padded(MAX_MANIFEST_BYTES + 1))), { problems: [too.slice(M.length)] });
+    assert.throws(() => readNoFollow(join(SAMPLE_M1A, 'milestone.json'), 10), (e) => e.code === 'too large');
+  });
+
+  it('caps the manifest at 64 KiB, and does not read a larger one (a sparse 3 GiB file)', () => {
+    assert.equal(MAX_MANIFEST_BYTES, 64 * 1024);
+    const dir = milestone();
+    truncateSync(join(dir, 'milestone.json'), 3 * 2 ** 30);
+    assert.deepEqual(problemsOf(dir), [`${M}larger than ${MAX_MANIFEST_BYTES} bytes (64 KiB): a manifest lists journey ids only`]);
+  });
+
+  it(`reports at most ${MAX_REPORTED_ENTRIES} bad entries, then how many more`, () => {
+    const bad = (n) => problemsOf(milestone({ 'milestone.json': JSON.stringify({ milestone: 'M1a', journeys: ['M1a-1', 'M1a-2', ...Array.from({ length: n }, (_, i) => `M2-${i + 1}`)] }) }));
+    const twenty = bad(MAX_REPORTED_ENTRIES);
+    assert.equal(twenty.length, MAX_REPORTED_ENTRIES);
+    assert.equal(twenty.at(-1), `${M}journeys[21] (M2-20) is not a journey of M1a: its id must start with M1a-`);
+    const more = bad(MAX_REPORTED_ENTRIES + 5);
+    assert.equal(more.length, MAX_REPORTED_ENTRIES + 1);
+    assert.equal(more.at(-2), `${M}journeys[21] (M2-20) is not a journey of M1a: its id must start with M1a-`);
+    assert.equal(more.at(-1), `${M}... and 5 more bad entries in "journeys"`);
+  });
+
+  it(`reports at most ${MAX_REPORTED_ENTRIES} listed journeys with no file, then how many more`, () => {
+    const dir = milestone({ 'milestone.json': JSON.stringify({ milestone: 'M1a', journeys: Array.from({ length: 25 }, (_, i) => `M1a-${i + 1}`) }) });
+    const p = problemsOf(dir);
+    assert.equal(p.length, MAX_REPORTED_ENTRIES + 1);
+    assert.equal(p[0], 'm1a-3.jsonl: missing: milestone.json lists M1a-3');
+    assert.equal(p.at(-2), 'm1a-22.jsonl: missing: milestone.json lists M1a-22');
+    assert.equal(p.at(-1), `${dir}: ... and 3 more listed journeys have no file`);
+  });
+});
+
+describe('the title length counts code points (lead item 5)', () => {
+  it('80 code points with astral characters pass, 81 fail', () => {
+    const emoji = String.fromCodePoint(0x1f600);
+    const title = (n) => `M1a-1: ${emoji.repeat(n - 7)}`;
+    assert.equal(Array.from(title(80)).length, 80);
+    assert.ok(title(80).length > 80, 'more UTF-16 units than code points');
+    assert.deepEqual(errorsOf(journey(title(80))), []);
+    assert.deepEqual(errorsOf(journey(title(81))), [{ line: 1, message: 'a chapter is at most 80 characters (code points), this one is 81' }]);
+  });
+});
+
+describe('names in messages (lead item 7, review finding a)', () => {
+  it('printableName escapes control and bidirectional characters, line feeds included', () => {
+    assert.equal(printableName(`a${ESC}[31mb${CR}c${LF}d${RLO}e`), 'a<U+001B>[31mb<U+000D>c<U+000A>d<U+202E>e');
+    assert.equal(printableName('plain/m1a'), 'plain/m1a');
+  });
+
+  it('checkMilestone names a directory through printableName when no label is given', () => {
+    const bad = join(TMP, `missing${ESC}[2J`);
+    assert.deepEqual(checkMilestone(bad).problems, [{ path: printableName(bad), line: null, message: 'cannot read: ENOENT' }]);
+    assert.ok(!printableName(bad).includes(ESC));
+  });
+
+  it('check and check-milestone print a path with control characters escaped', () => {
+    const parent = join(TMP, `esc${ESC}[31m${CR}x`);
+    mkdirSync(parent);
+    cpSync(SAMPLE_M1A, join(parent, 'm1a'), { recursive: true });
+    writeFileSync(join(parent, 'm1a', 'm1a-2.jsonl'), journey('M1a-2: SAMPLE', ['output', 'Bearer abc123']));
+    const shownParent = printableName(parent);
+    const m = cliRun(['check-milestone', join(parent, 'm1a')]);
+    const c = cliRun(['check', join(parent, 'm1a', 'm1a-2.jsonl'), join(parent, 'missing.jsonl')]);
+    const s = cliRun(['check', '--secret-file', join(parent, 'missing.json'), SAMPLE]);
+    assert.ok(m.stderr.includes(`${shownParent}/m1a/m1a-2.jsonl:2: Bearer credential in "text"`), m.stderr);
+    assert.ok(c.stderr.includes(`${shownParent}/m1a/m1a-2.jsonl:2: Bearer credential in "text"`), c.stderr);
+    assert.ok(c.stderr.includes(`${shownParent}/missing.jsonl: cannot read: ENOENT`), c.stderr);
+    assert.equal(s.status, 2);
+    assert.ok(s.stderr.includes(`--secret-file ${shownParent}/missing.json: cannot read`), s.stderr);
+    for (const r of [m, c, s]) assert.ok(!(r.stdout + r.stderr).includes(ESC) && !(r.stdout + r.stderr).includes(CR), JSON.stringify(r.stderr));
+  });
+
+  it('prints only recognized entry names: any other entry by its place in the listing', () => {
+    const SECRET = 'hunter2-not-real-77';
+    const dir = milestone({ [SECRET]: 'x', [JWT]: 'x' });
+    const r = cliRun(['check-milestone', '--secret-env', 'S', dir], { env: { S: SECRET } });
+    assert.equal(r.status, 1);
+    // Sorted: the JWT name, the secret, m1a-1.jsonl, m1a-2.jsonl, milestone.json.
+    assert.ok(r.stderr.includes(`${dir}/<entry 1>: not listed in milestone.json`), r.stderr);
+    assert.ok(r.stderr.includes(`${dir}/<entry 2>: not listed in milestone.json`), r.stderr);
+    for (const needle of [SECRET, JWT.slice(0, 20)]) assert.ok(!(r.stdout + r.stderr).includes(needle), r.stderr);
+  });
+
+  it('never prints a recognized name, a listed file\'s name or a path argument that matches a secret value', () => {
+    const name = 'm1a-9.jsonl';
+    const dir = milestone({ [name]: journey('M1a-9: SAMPLE nine') });
+    const r = cliRun(['check-milestone', '--secret-env', 'S', dir], { env: { S: name } });
+    assert.equal(r.status, 1);
+    assert.ok(r.stderr.includes(`${dir}/<entry 3>: not listed in milestone.json`), r.stderr);
+    assert.ok(!(r.stdout + r.stderr).includes(name), r.stderr);
+    const listedMissing = milestone({ 'm1a-2.jsonl': null });
+    const l = cliRun(['check-milestone', '--secret-env', 'S', listedMissing], { env: { S: 'm1a-2.jsonl' } });
+    assert.ok(l.stderr.includes(`${listedMissing}/<listed file 2>: missing: milestone.json lists M1a-2`), l.stderr);
+    assert.ok(!l.stderr.includes('m1a-2.jsonl'), l.stderr);
+    const SECRET = 'path-secret-55555';
+    const root = join(TMP, SECRET);
+    mkdirSync(root);
+    cpSync(SAMPLE_M1A, join(root, 'm1a'), { recursive: true });
+    writeFileSync(join(root, 'm1a', 'extra.txt'), 'x');
+    for (const args of [['check-milestone', SAMPLE_M1A, join(root, 'm1a')], ['check', SAMPLE, join(root, 'missing.jsonl')]]) {
+      const a = cliRun([args[0], '--secret-env', 'S', ...args.slice(1)], { env: { S: SECRET } });
+      assert.equal(a.status, 1);
+      assert.ok(a.stderr.includes('<argument 2>'), a.stderr);
+      assert.ok(!(a.stdout + a.stderr).includes(SECRET), a.stderr);
+    }
+  });
+});
+
+describe('records refused for their fields keep their place (review finding b)', () => {
+  const [a, b] = [JWT.slice(0, 33), JWT.slice(33)];
+
+  it('in a single file: a value split over a record with an unknown or a missing field is found', () => {
+    const extra = `${JSON.stringify({ step: 0, type: 'output', text: `token ${a}`, extra: 1 })}\n${line(1, 'output', b)}\n`;
+    assert.deepEqual(errorsOf(extra), [
+      { line: 1, message: '1 unknown field(s) (allowed: step, type, text, allow)' },
+      { line: 2, message: 'JWT-shaped string across the records on lines 1-2 (texts joined)' },
+    ]);
+    const noType = `${JSON.stringify({ step: 0, text: `token ${a}` })}\n${line(1, 'output', b)}\n`;
+    assert.deepEqual(errorsOf(noType), [
+      { line: 1, message: 'missing field "type"' },
+      { line: 2, message: 'JWT-shaped string across the records on lines 1-2 (texts joined)' },
+    ]);
+    // Never in the returned records.
+    assert.deepEqual(check(`${JSON.stringify({ step: 0, type: 'output', text: 'x', extra: 1 })}\n`).records, []);
+  });
+
+  it('across a journey boundary: the chapter-stripped pass pairs the right neighbours', () => {
+    const dir = milestone({
+      'm1a-1.jsonl': `${line(0, 'chapter', 'M1a-1: SAMPLE first')}\n${line(1, 'caption', 'SAMPLE')}\n${JSON.stringify({ step: 2, type: 'output', text: `token ${a}`, extra: 1 })}\n`,
+      'm1a-2.jsonl': journey('M1a-2: SAMPLE second', ['output', b]),
+    });
+    assert.deepEqual(problemsOf(dir), [
+      'm1a-1.jsonl:3: 1 unknown field(s) (allowed: step, type, text, allow)',
+      'm1a-2.jsonl:2: JWT-shaped string across the records on m1a-1.jsonl:3 - m1a-2.jsonl:2 (chapters removed)',
+    ]);
+  });
+});
+
+describe('reading without following a link, on every platform (review finding c)', () => {
+  it('refuses a symlink at lstat, and a file replaced between the lstat and the open', () => {
+    const dir = join(TMP, 'swap');
+    mkdirSync(dir);
+    const target = join(dir, 'm1a-1.jsonl');
+    const other = join(dir, 'other.jsonl');
+    const reset = () => {
+      rmSync(target, { force: true });
+      writeFileSync(target, 'original\n');
+      writeFileSync(other, 'other\n');
+    };
+    reset();
+    assert.equal(readNoFollow(target).toString(), 'original\n');
+    // Another regular file renamed over it: no O_NOFOLLOW can see that, the
+    // device and inode comparison does.
+    assert.throws(() => readNoFollow(target, Infinity, { beforeOpen: () => renameSync(other, target) }), (e) => e.code === 'changed');
+    // A symlink put in its place: O_NOFOLLOW refuses it where Node has it
+    // (ELOOP), the comparison everywhere else ('changed').
+    reset();
+    assert.throws(
+      () =>
+        readNoFollow(target, Infinity, {
+          beforeOpen: () => {
+            unlinkSync(target);
+            symlinkSync(other, target);
+          },
+        }),
+      (e) => e.code === 'ELOOP' || e.code === 'changed',
+    );
+    // A symlink already there is refused by the lstat.
+    assert.throws(() => readNoFollow(target), (e) => e.code === 'ELOOP');
+  });
+});
+
+describe('the directory\'s own name (review finding d)', () => {
+  it('is taken from the resolved path: ".", "m1a/", "m1a/." and "./m1a" pass', () => {
+    const root = join(TMP, 'dot');
+    mkdirSync(root);
+    cpSync(SAMPLE_M1A, join(root, 'm1a'), { recursive: true });
+    assert.equal(cliRun(['check-milestone', '.'], { cwd: join(root, 'm1a') }).status, 0);
+    for (const arg of ['m1a/', 'm1a/.', './m1a', 'm1a//']) {
+      const r = cliRun(['check-milestone', arg], { cwd: root });
+      assert.equal(r.status, 0, `${arg}: ${r.stderr}`);
+    }
+  });
+
+  it('still refuses a symlinked directory, however the path ends', () => {
+    const root = join(TMP, 'dot-link');
+    mkdirSync(root);
+    symlinkSync(SAMPLE_M1A, join(root, 'm1a'));
+    for (const arg of ['m1a', 'm1a/', 'm1a/.']) {
+      const r = cliRun(['check-milestone', arg], { cwd: root });
+      assert.equal(r.status, 1, arg);
+      assert.match(r.stderr, /a symlink: a milestone directory must be a directory, not a link to one/, arg);
+    }
   });
 });

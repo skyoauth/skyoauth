@@ -11,6 +11,8 @@
 //!   `restore`) are unknown outcomes carrying the code, every other
 //!   refusal, and these two after a `preview` or a `status`, are refused;
 //! - an issued reply whose members are not its challenge's is unknown;
+//! - `issue_challenge_verbatim` gives the issued reply line exactly as the
+//!   server wrote it, with its checked challenge;
 //! - after a failed write (a broken pipe), a failed end of the write half
 //!   or a reset, the reply is still read and the bytes read are kept, but
 //!   only a refusal is believed: a success the server sent without reading
@@ -64,10 +66,10 @@ use serde_json::Value;
 use skyoauth_operator::{
     local::{
         BootstrapRequest, BootstrapVerdict, CallError, Connector, DEFAULT_IDLE_WAIT,
-        DEFAULT_TOTAL_WAIT, ErrorCode, HalfClose, IssueChallengeRequest, Issued, LocalClient,
-        MAX_REPLY_BYTES, MAX_REQUEST_BYTES, MAX_REVOKED_IDS_PER_REPLY, NotSent, Op, Reply, Request,
-        ResponseRequest, RestoreVerdict, Restored, Retry, SocketPath, StatusRequest, Timeouts,
-        UnknownOutcome, parse_reply,
+        DEFAULT_TOTAL_WAIT, ErrorCode, HalfClose, IssueChallengeRequest, Issued, IssuedChallenge,
+        LocalClient, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, MAX_REVOKED_IDS_PER_REPLY, NotSent, Op,
+        Reply, Request, ResponseRequest, RestoreVerdict, Restored, Retry, SocketPath,
+        StatusRequest, Timeouts, UnknownOutcome, parse_reply,
     },
     recovery::RecoveryPublicKey,
 };
@@ -457,6 +459,82 @@ fn an_issued_reply_that_is_not_its_challenges_is_unknown() {
             outcome,
             Err(CallError::Unknown(UnknownOutcome::ChallengeMismatch))
         );
+    }
+}
+
+/// `issue_challenge_verbatim` against a fake server that reads the golden
+/// issue request and writes `reply`, one connection: its outcome.
+fn issued_verbatim(reply: Vec<u8>) -> Result<IssuedChallenge, CallError> {
+    let Request::IssueChallenge(issue) = request(Op::IssueChallenge) else {
+        unreachable!()
+    };
+    let dir = TempDir::new();
+    let path = dir.join("s");
+    let listener = UnixListener::bind(&path).unwrap();
+    let line = Request::IssueChallenge(issue.clone())
+        .encode()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let server = thread::spawn(move || {
+        let mut stream = accept_within(&listener);
+        stream.set_read_timeout(Some(TEST_WAIT)).unwrap();
+        stream.set_write_timeout(Some(TEST_WAIT)).unwrap();
+        read_request(&mut stream, &line);
+        stream.write_all(&reply).unwrap();
+    });
+    let (client, connects) = counted(&path, PATIENT);
+    let outcome = client.issue_challenge_verbatim(&issue);
+    server.join().expect("the fake server's checks");
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
+    outcome
+}
+
+/// `issue_challenge_verbatim` gives the reply line exactly as the server
+/// wrote it, with the challenge `issue_challenge` gives for it; `Debug`
+/// shows neither. Its other outcomes are `issue_challenge`'s: a reply
+/// that is not its challenge's is unknown, a store failure an uncertain
+/// commit, another refusal refused, another operation's success unknown.
+#[test]
+fn the_verbatim_issue_gives_the_reply_line_as_sent() {
+    let golden_line = golden("issued");
+    let issued = issued_verbatim(golden_line.clone()).unwrap();
+    assert_eq!(issued.line, golden_line);
+    let Ok(Reply::Issued(expected)) = parse_reply(Op::IssueChallenge, &golden_line) else {
+        panic!("the golden issued reply");
+    };
+    assert_eq!(issued.challenge.message(), expected.challenge.as_slice());
+    assert_eq!(issued.challenge.operation_id(), expected.operation_id);
+    assert_eq!(issued.challenge.expires_at_micros(), expected.expires_at);
+    assert_eq!(
+        issued.challenge.expected_revision(),
+        expected.expected_revision
+    );
+    assert_eq!(format!("{issued:?}"), "IssuedChallenge(..)");
+
+    let mut other_operation = String::from_utf8(golden_line).unwrap();
+    let golden_id = expected.operation_id.as_str();
+    other_operation = other_operation.replacen(golden_id, "other-operation", 1);
+    let cases = [
+        (
+            other_operation.into_bytes(),
+            CallError::Unknown(UnknownOutcome::ChallengeMismatch),
+        ),
+        (
+            golden("error_server_error"),
+            CallError::Unknown(UnknownOutcome::UncertainCommit(ErrorCode::ServerError)),
+        ),
+        (
+            golden("error_conflict"),
+            CallError::Refused(ErrorCode::Conflict),
+        ),
+        (
+            golden_success(Op::Preview),
+            CallError::Unknown(UnknownOutcome::Malformed),
+        ),
+    ];
+    for (reply, expected) in cases {
+        assert_eq!(issued_verbatim(reply), Err(expected));
     }
 }
 

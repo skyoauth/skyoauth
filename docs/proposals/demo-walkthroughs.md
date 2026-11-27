@@ -398,19 +398,38 @@ tests/demo/golden/<m>/<journey>.jsonl  one golden transcript per journey (writte
 2. each journey file alone, with every rule (as `check` does) plus the
    chapter at step 0 with the matching journey id;
 3. the **joined stream**: the journey files in manifest order, each record
-   with `step` = (records in the earlier journeys) + (its step in its file),
-   validated in milestone mode. It is built from **every parsed record** of
-   every file, never only the valid ones, so a record that fails a rule in its
-   file still takes part in the windows. The pair windows cross journey
-   boundaries (the last record of one journey with the next chapter, and that
-   chapter with the next journey's first record).
+   with `step` = (records in the earlier journeys) + (its step in its file).
+   As built (PR 1, after the lead's review of #219): when every journey file
+   is valid, the joined stream is serialized and validated in milestone
+   mode with every rule and the secret values, so a rule that depends on the
+   renumbered step is applied (a record at the 16 KiB cap in its file can
+   exceed it once its step has more digits), and each error is mapped back
+   to its file and line. When a file has errors, its records are not all
+   valid, so the stream is not serialized: the pair windows across each
+   journey boundary (the last record of one journey with the next chapter)
+   are checked over **every parsed record** of every file, never only the
+   valid ones, so a record that fails a rule in its file still takes part.
+   Every other window of the joined stream is one file's (the chapter with
+   its journey's first record included), already checked in step 2.
+   "Every parsed record" includes a record refused for its fields (an
+   unknown key, a missing `step` or `type`) whose `text` is a string: it is
+   never a valid record, but it keeps its place in every window;
 4. a **chapter-stripped pass** over the same records without the chapters,
    so a value split over the last record of one journey and the first of the
-   next is found. It does not renumber: each record keeps its file and line.
-   Chapters stay hard boundaries for the runs of `output` and `note` records,
-   so a run window never spans a journey boundary; only the pair windows do;
+   next is found. It does not renumber: each record keeps its file and line,
+   and its messages end `(chapters removed)` where the joined pass's end
+   `(texts joined)`. Chapters stay hard boundaries for the runs of `output`
+   and `note` records, so a run window never spans a journey boundary; only
+   the pair windows do;
 5. one window over all the chapter titles joined (direct and with a space),
-   in manifest order.
+   in manifest order, reported as `(titles joined)`.
+
+**Known gap (accepted by the lead):** a value split over three or more
+records across a journey boundary is not found: the last record of one
+journey, the next chapter and the next journey's first record, or two
+records on one side and one on the other. Only pairs cross a boundary. The
+title card clears the terminal and the caption bar, so the pieces are never
+on screen together.
 
 Errors are reported at a file and line, never at a joined line
 (`m1a-2.jsonl:1: JWT-shaped string across the records on m1a-1.jsonl:14 -
@@ -421,6 +440,18 @@ of that directory is still checked alone (steps 1 and 2) before the next
 directory. Exit status 1 when anything failed. With no directory at all it
 is a usage error (exit 2), like `check` with no file, so a glob that matched
 nothing fails.
+
+Limits and names, as built: the directory's own name is taken from the
+resolved path (`.` and `m1a/` work). A manifest over 64 KiB is refused
+unread; one too deeply nested to read is reported as such; at most 20 bad
+`journeys` entries and 20 listed journeys with no file are reported, then
+`... and N more`. A file is read after an `lstat` and must be the same file
+(device and inode) once open; `O_NOFOLLOW` is added where Node has it (not
+on Windows). No name is echoed as given: a directory entry is printed only
+when it is `milestone.json` or a journey file name and matches no secret
+rule or value (else `<entry N>`), a path argument that matches one is
+`<argument N>`, and every printed name has its control and bidirectional
+characters escaped (`<U+001B>`).
 
 **6.4 Timing and the opening commit caption.** The milestone video plays
 the joined stream: every time comes from `timing.buildTimeline(joined

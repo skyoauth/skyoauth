@@ -45,7 +45,7 @@
 // Pure Node, no dependencies.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const TYPES = ['caption', 'command', 'output', 'note', 'chapter'];
@@ -150,7 +150,7 @@ export const BEARER_AUTH_PARAMS = ['realm', 'scope', 'error', 'error_description
 //     heuristic applies there. The value ends at a blank, quote, comma or
 //     semicolon, or at an escape that decodes to a blank or a quote: \n \r
 //     \t \" \' (lower case only). Any other backslash is part of the value,
-//     so `Bearer <redacted>\a1b2`, `\\abc`, `\/abc`, `\b`, `\f`, `A`
+//     so `Bearer <redacted>\a1b2`, `\\abc`, `\/abc`, `\b`, `\f`, `\u0041`
 //     and an upper-case `\N` or `\U1b2c3` are refused. The field and scheme
 //     names match in any case through explicit [Aa] classes, not the `i`
 //     flag, which would also make the escape letters match in either case.
@@ -199,6 +199,17 @@ export function hasLongBase64url(text) {
 // embedding, override and isolate characters (which can make a line read
 // differently from its bytes).
 const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
+
+// Control and bidirectional characters (CONTROL) and line feeds, in a name.
+const NAME_UNSAFE = new RegExp(`[\\n]|${CONTROL.source}`, 'gu');
+
+// A file or directory name as a message prints it: each control or
+// bidirectional character, line feed included, as <U+XXXX>, so a name can
+// neither move the cursor (ESC), rewrite the line (CR) nor start a line
+// that looks like another message (LF).
+export function printableName(name) {
+  return String(name).replace(NAME_UNSAFE, (c) => `<${describeChar(c)}>`);
+}
 
 // A small RFC 8259 scanner. Parses `text` into plain values, except that an
 // object is a JsonObject holding every [key, value] entry in file order,
@@ -374,7 +385,9 @@ function rulesFor(secrets) {
 // (with or without other errors) as `entries`: { line, raw, step, type,
 // text, allow, ok, fired: Set of rule names }. check-milestone builds its
 // joined passes from them.
-function validateEntries(bytes, { secrets = new Map(), milestone = false, journeyFile = null } = {}) {
+// `lineLabel(line)`, when given, names a line in the message of a window
+// (check-milestone maps a joined line back to its file and line).
+function validateEntries(bytes, { secrets = new Map(), milestone = false, journeyFile = null, lineLabel = null } = {}) {
   if (milestone && journeyFile !== null) throw new Error('validateTranscript: milestone and journeyFile exclude each other');
   const errors = [];
   const err = (line, message) => errors.push({ line, message });
@@ -425,15 +438,30 @@ function validateEntries(bytes, { secrets = new Map(), milestone = false, journe
       err(n, 'a record must be a JSON object');
       return;
     }
+    // A record refused for its fields still takes part in the secret
+    // checks and the windows when its text is a string: it is never in the
+    // returned records, but its neighbours stay its neighbours.
+    // Its valid step still counts, so the next record is not refused for
+    // the gap.
+    const refused = () => {
+      if (Number.isSafeInteger(value.step) && value.step >= 0) expected = value.step + 1;
+      if (typeof value.text !== 'string') return;
+      const allow = ALLOW_MARKERS.includes(value.allow) ? value.allow : null;
+      entries.push({ line: n, raw: line, step: value.step, type: TYPES.includes(value.type) ? value.type : null, text: value.text, allow, ok: false, fired: new Set() });
+    };
     const unknown = Object.keys(value).filter((k) => !['step', 'type', 'text', 'allow'].includes(k));
     if (unknown.length) {
       err(n, `${unknown.length} unknown field(s) (allowed: step, type, text, allow)`);
+      refused();
       return;
     }
     for (const k of ['step', 'type', 'text']) {
       if (!(k in value)) err(n, `missing field "${k}"`);
     }
-    if (!('step' in value && 'type' in value && 'text' in value)) return;
+    if (!('step' in value && 'type' in value && 'text' in value)) {
+      refused();
+      return;
+    }
     const { step, type, text: body, allow } = value;
     let ok = true;
     if (!Number.isSafeInteger(step) || step < 0) {
@@ -546,7 +574,8 @@ function validateEntries(bytes, { secrets = new Map(), milestone = false, journe
   checkGroups(recordWindows(entries), rules, (group, rule) => {
     const first = group[0].line;
     const last = group[group.length - 1].line;
-    fire(group, rule.name, last, `across the records on lines ${first}-${last} (texts joined)`);
+    const span = lineLabel ? `${lineLabel(first)} - ${lineLabel(last)}` : `lines ${first}-${last}`;
+    fire(group, rule.name, last, `across the records on ${span} (texts joined)`);
   });
 
   const records = entries.filter((e) => e.ok).map(recordOf);
@@ -644,11 +673,11 @@ export function secretsFromEnv(names, env = process.env) {
   const secrets = new Map();
   for (const name of names) {
     const value = env[name];
-    if (value === undefined || value === '') throw new UsageError(`--secret-env ${name}: the variable is unset or empty`);
+    if (value === undefined || value === '') throw new UsageError(`--secret-env ${printableName(name)}: the variable is unset or empty`);
     if (value.length < MIN_SECRET_LENGTH) {
-      throw new UsageError(`--secret-env ${name}: the value is shorter than ${MIN_SECRET_LENGTH} characters and would match ordinary text`);
+      throw new UsageError(`--secret-env ${printableName(name)}: the value is shorter than ${MIN_SECRET_LENGTH} characters and would match ordinary text`);
     }
-    secrets.set(name, value);
+    secrets.set(printableName(name), value);
   }
   return secrets;
 }
@@ -691,14 +720,14 @@ export function secretsFromFile(path) {
   try {
     content = readFileSync(path, 'utf8');
   } catch (e) {
-    throw new UsageError(`--secret-file ${path}: cannot read: ${e.code ?? 'error'}`);
+    throw new UsageError(`--secret-file ${printableName(path)}: cannot read: ${e.code ?? 'error'}`);
   }
   let json;
   try {
     json = scanJson(content);
   } catch (at) {
     if (typeof at !== 'number') throw at;
-    throw new UsageError(`--secret-file ${path}: not JSON at character ${at + 1}`);
+    throw new UsageError(`--secret-file ${printableName(path)}: not JSON at character ${at + 1}`);
   }
   const secrets = new Map();
   // A key name is part of a label (messages, rule names) only when it is
@@ -722,15 +751,15 @@ export function secretsFromFile(path) {
         const here = at ? `${at}.${segment(k, i)}` : segment(k, i);
         for (const v of byKey.get(k)) {
           if (SECRET_KEYS.has(k) && typeof v === 'string') {
-            if (v.length < MIN_SECRET_LENGTH) throw new UsageError(`--secret-file ${path}: ${here} is shorter than ${MIN_SECRET_LENGTH} characters`);
-            addSecret(secrets, `${basename(path)} ${here}`, v);
+            if (v.length < MIN_SECRET_LENGTH) throw new UsageError(`--secret-file ${printableName(path)}: ${here} is shorter than ${MIN_SECRET_LENGTH} characters`);
+            addSecret(secrets, `${printableName(basename(path))} ${here}`, v);
           } else walk(v, here);
         }
       }
     }
   };
   walk(json, '');
-  if (secrets.size === 0) throw new UsageError(`--secret-file ${path}: no string under a key named ${[...SECRET_KEYS].join(', ')}`);
+  if (secrets.size === 0) throw new UsageError(`--secret-file ${printableName(path)}: no string under a key named ${[...SECRET_KEYS].join(', ')}`);
   return secrets;
 }
 
@@ -742,18 +771,56 @@ export function secretsFromFile(path) {
 // The directory's name is the milestone id in lower case; each listed
 // journey's file is named exactly `<lower-case journey id>.jsonl`; the
 // directory holds nothing else (no unlisted file, no nested directory, no
-// symlink: every entry is checked with lstat, and files are opened with
-// O_NOFOLLOW). A name that is not plain [A-Za-z0-9._-] is never printed:
-// it is shown by its 1-based position in the sorted listing, <entry 3>.
+// symlink: every entry is checked with lstat, and files are read with
+// readNoFollow). A directory entry is printed only when it is recognized
+// (milestone.json or a journey file name, <lower-case journey id>.jsonl)
+// and matches no secret rule or value (nameMatchesSecret); any other is
+// shown by its 1-based position in the sorted listing, <entry 3>. Every
+// other name a message prints goes through printableName, and a path
+// argument that matches a secret rule or value is shown as <argument N>.
 
-// Reads a regular file without following a symlink at its last component
-// (a second guard behind the lstat of every entry, for a file replaced by a
-// link between the two).
-export function readNoFollow(path) {
+// Largest manifest read, in bytes: a list of journey ids is far smaller.
+export const MAX_MANIFEST_BYTES = 65536;
+// Bad manifest entries (and listed journeys with no file) reported one by
+// one; the rest are counted in one "... and N more" line.
+export const MAX_REPORTED_ENTRIES = 20;
+
+// The first MAX_REPORTED_ENTRIES messages, then one that counts the rest.
+function capped(messages, rest) {
+  if (messages.length <= MAX_REPORTED_ENTRIES) return messages;
+  return [...messages.slice(0, MAX_REPORTED_ENTRIES), `... and ${messages.length - MAX_REPORTED_ENTRIES} more ${rest}`];
+}
+
+// Whether a name matches a secret rule or value (`rules`, rulesFor): such
+// a name is never printed.
+function nameMatchesSecret(name, rules) {
+  return rules.some((rule) => hits(rule, name) || hits(rule, name, true));
+}
+
+// Reads a regular file without following a symlink at its last component.
+// On every platform: the path is checked with lstat (a symlink is refused
+// with code ELOOP, anything but a regular file with 'not a regular file'),
+// then opened, and the open file must be the same file (device and inode,
+// as bigints) as the one lstat saw, so a file replaced between the two
+// (by a link or another file) is refused with code 'changed'. Where Node
+// has O_NOFOLLOW (POSIX; not Windows), the open also refuses a symlink
+// itself. With `maxBytes`, a larger file is not read: code 'too large'.
+// `beforeOpen` is a test hook, called between the lstat and the open.
+export function readNoFollow(path, maxBytes = Infinity, { beforeOpen = () => {} } = {}) {
+  const fail = (code) => Object.assign(new Error(code), { code });
+  const seen = lstatSync(path, { bigint: true });
+  if (seen.isSymbolicLink()) throw fail('ELOOP');
+  if (!seen.isFile()) throw fail('not a regular file');
+  beforeOpen();
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
-    if (!fstatSync(fd).isFile()) throw Object.assign(new Error('not a regular file'), { code: 'not a regular file' });
-    return readFileSync(fd);
+    const st = fstatSync(fd, { bigint: true });
+    if (!st.isFile()) throw fail('not a regular file');
+    if (st.dev !== seen.dev || st.ino !== seen.ino) throw fail('changed');
+    if (st.size > BigInt(Math.min(maxBytes, Number.MAX_SAFE_INTEGER))) throw fail('too large');
+    const bytes = readFileSync(fd);
+    if (bytes.length > maxBytes) throw fail('too large');
+    return bytes;
   } finally {
     closeSync(fd);
   }
@@ -761,9 +828,11 @@ export function readNoFollow(path) {
 
 // Checks a manifest's bytes. Returns { milestone, journeys } or { problems:
 // [message] }. A message never repeats a value that is not a valid id, nor
-// an unknown key's name.
+// an unknown key's name. One message per bad entry of "journeys" (the
+// first problem found), at most MAX_REPORTED_ENTRIES of them.
 export function parseManifest(bytes) {
   const problems = [];
+  if (bytes.length > MAX_MANIFEST_BYTES) return { problems: [`larger than ${MAX_MANIFEST_BYTES} bytes (64 KiB): a manifest lists journey ids only`] };
   let text;
   try {
     text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
@@ -774,6 +843,9 @@ export function parseManifest(bytes) {
   try {
     doc = scanJson(text);
   } catch (at) {
+    // scanJson recurses once per level: a deep enough nesting exhausts the
+    // stack. Its message is not shown.
+    if (at instanceof RangeError) return { problems: ['too deeply nested to read: a manifest is one object holding a list'] };
     if (typeof at !== 'number') throw at;
     return { problems: [`not JSON at character ${at + 1}`] };
   }
@@ -796,15 +868,14 @@ export function parseManifest(bytes) {
     else if (journeys.length === 0) problems.push('"journeys" is empty: a milestone lists at least one journey');
     else {
       const seen = new Map();
+      const bad = [];
       journeys.forEach((id, i) => {
-        if (typeof id !== 'string' || !JOURNEY_ID.test(id)) {
-          problems.push(`journeys[${i}] is not a journey id (^M[1-5][ab]?-[1-9][0-9]*$)`);
-          return;
-        }
-        if (milestoneOk && !id.startsWith(`${milestone}-`)) problems.push(`journeys[${i}] (${id}) is not a journey of ${milestone}: its id must start with ${milestone}-`);
-        if (seen.has(id)) problems.push(`journeys[${i}] (${id}) repeats journeys[${seen.get(id)}]: each journey is listed once`);
+        if (typeof id !== 'string' || !JOURNEY_ID.test(id)) bad.push(`journeys[${i}] is not a journey id (^M[1-5][ab]?-[1-9][0-9]*$)`);
+        else if (milestoneOk && !id.startsWith(`${milestone}-`)) bad.push(`journeys[${i}] (${id}) is not a journey of ${milestone}: its id must start with ${milestone}-`);
+        else if (seen.has(id)) bad.push(`journeys[${i}] (${id}) repeats journeys[${seen.get(id)}]: each journey is listed once`);
         else seen.set(id, i);
       });
+      problems.push(...capped(bad, 'bad entries in "journeys"'));
     }
   }
   return problems.length ? { problems } : { milestone, journeys };
@@ -822,60 +893,76 @@ export function joinJourneys(lists) {
   return joined;
 }
 
-// Checks one milestone directory: the names and the manifest, each
+// Checks one milestone directory: the names and the manifest, then each
 // journey file alone (validateTranscript with journeyFile: every rule, plus
-// its chapter at step 0 naming the file's journey), and, when the manifest
-// is good and every listed file could be read, over every parsed record of
-// every file (never only the valid ones), in manifest order:
-//   - the joined stream: the pairs of adjacent records across a journey
-//     boundary (the last record of one journey with the next journey's
-//     chapter);
-//   - the chapter-stripped stream: the same records without the chapters,
-//     each keeping its file and line, so a value split over the last record
-//     of one journey and the first record of the next is found;
+// its chapter at step 0 naming the file's journey), then, when the manifest
+// is good and every listed file could be read, the journeys in manifest
+// order:
+//   - the joined stream. When every journey file is valid, the joined
+//     stream itself (joinJourneys, serialized) is validated in milestone
+//     mode with every rule, so a rule that depends on the renumbered step
+//     (the record byte cap) is applied, and each error is mapped back to its
+//     file and line. When a file has errors, its records are not all valid
+//     records, so the joined stream is not serialized: the pairs of
+//     adjacent records across each journey boundary (the last record of one
+//     journey with the next one's chapter) are checked over every parsed
+//     record of every file, the ones with errors included. Every other
+//     window of the joined stream is one file's, already checked alone (a
+//     chapter ends a run of output and note records);
+//   - the chapter-stripped stream: every parsed record without the
+//     chapters, each keeping its file and line: the pairs of records that
+//     the stripping makes adjacent (the last record of one journey and the
+//     first record of the next), reported as "(chapters removed)". A run of
+//     output and note records never spans a journey boundary;
 //   - the title window: every chapter's text joined, in manifest order.
-// A run of output and note records never spans a journey boundary (the
-// chapters stay hard boundaries), so only those pairs are new: every other
-// window of the joined stream is a window of one file, already checked
-// alone. Each record keeps the rules it fired alone, so an error already
-// reported for a file is not reported again for a larger window, and allow
-// markers carry over unchanged. With a bad manifest every .jsonl file of
-// the directory is still checked alone.
+// Each record keeps the rules it fired alone and in the earlier passes, so
+// an error already reported is not reported again for a larger window, and
+// allow markers carry over unchanged. With a bad manifest every .jsonl file
+// of the directory is still checked alone.
 //
+// `label` is how messages name the directory (default printableName).
 // Returns { problems: [{ path, line, message }] (line null for a name or
 // manifest problem), notes: [string], files, records, milestone, joined }:
 // `joined` is the renumbered joined stream (joinJourneys) when nothing
 // failed, else null.
-export function checkMilestone(dirArg, { secrets = new Map() } = {}) {
+export function checkMilestone(dirArg, { secrets = new Map(), label: dirLabel = printableName(dirArg) } = {}) {
   const problems = [];
   const notes = [];
   const result = { problems, notes, files: 0, records: 0, milestone: null, joined: null };
   const at = (path, message, line = null) => problems.push({ path, line, message });
-  const dir = dirArg.length > 1 ? dirArg.replace(/\/+$/, '') || '/' : dirArg;
+  // The directory itself, resolved: `.`, `m1a/` and `m1a/.` name it by its
+  // own name, and lstat sees a symlink however the path ends.
+  const dir = resolve(dirArg);
+  const dirShown = dirLabel.length > 1 ? dirLabel.replace(/\/+$/, '') || '/' : dirLabel;
   let st;
   try {
     st = lstatSync(dir);
   } catch (e) {
-    at(dirArg, `cannot read: ${e.code ?? 'error'}`);
+    at(dirLabel, `cannot read: ${e.code ?? 'error'}`);
     return result;
   }
   if (st.isSymbolicLink()) {
-    at(dirArg, 'a symlink: a milestone directory must be a directory, not a link to one');
+    at(dirLabel, 'a symlink: a milestone directory must be a directory, not a link to one');
     return result;
   }
   if (!st.isDirectory()) {
-    at(dirArg, 'not a directory');
+    at(dirLabel, 'not a directory');
     return result;
   }
   let names;
   try {
     names = readdirSync(dir).sort();
   } catch (e) {
-    at(dirArg, `cannot read: ${e.code ?? 'error'}`);
+    at(dirLabel, `cannot read: ${e.code ?? 'error'}`);
     return result;
   }
-  const shown = (name) => (/^[A-Za-z0-9._-]{1,100}$/.test(name) ? name : `<entry ${names.indexOf(name) + 1}>`);
-  const pathOf = (name) => join(dir, shown(name));
+  const rules = rulesFor(secrets);
+  // Only a recognized name is printed (the manifest's, or a journey file
+  // name), and only when it matches no secret rule or value: any other
+  // entry is shown by its place in the sorted listing.
+  const recognized = (name) => name === MANIFEST || journeyIdOfFile(name) !== null;
+  const shown = (name) => (recognized(name) && !nameMatchesSecret(name, rules) ? name : `<entry ${names.indexOf(name) + 1}>`);
+  const pathOf = (name) => join(dirShown, shown(name));
 
   // Every entry with lstat: only regular files may stay.
   const regular = new Set();
@@ -895,34 +982,37 @@ export function checkMilestone(dirArg, { secrets = new Map() } = {}) {
 
   // The manifest.
   let manifest = null;
-  if (!names.includes(MANIFEST)) at(join(dir, MANIFEST), 'missing: a milestone directory holds its manifest');
+  if (!names.includes(MANIFEST)) at(join(dirShown, MANIFEST), 'missing: a milestone directory holds its manifest');
   else if (regular.has(MANIFEST)) {
     let bytes;
     try {
-      bytes = readNoFollow(join(dir, MANIFEST));
+      bytes = readNoFollow(join(dir, MANIFEST), MAX_MANIFEST_BYTES);
     } catch (e) {
-      at(join(dir, MANIFEST), `cannot read: ${e.code ?? 'error'}`);
+      at(join(dirShown, MANIFEST), e.code === 'too large' ? `larger than ${MAX_MANIFEST_BYTES} bytes (64 KiB): a manifest lists journey ids only` : `cannot read: ${e.code ?? 'error'}`);
     }
     if (bytes) {
       const parsed = parseManifest(bytes);
-      if (parsed.problems) for (const p of parsed.problems) at(join(dir, MANIFEST), p);
+      if (parsed.problems) for (const p of parsed.problems) at(join(dirShown, MANIFEST), p);
       else manifest = parsed;
     }
   }
   const dirName = basename(dir);
   if (manifest) {
     result.milestone = manifest.milestone;
-    if (dirName !== manifest.milestone.toLowerCase()) at(dirArg, `the directory name is not ${manifest.milestone.toLowerCase()}, the lower case of the milestone id ${manifest.milestone}`);
+    if (dirName !== manifest.milestone.toLowerCase()) at(dirLabel, `the directory name is not ${manifest.milestone.toLowerCase()}, the lower case of the milestone id ${manifest.milestone}`);
   } else if (!/^m[1-5][ab]?$/.test(dirName)) {
-    at(dirArg, 'the directory name is not a lower-case milestone id (such as m1a or m2)');
+    at(dirLabel, 'the directory name is not a lower-case milestone id (such as m1a or m2)');
   }
 
   // Listed, missing and unlisted files.
   const listed = manifest ? manifest.journeys.map((id) => ({ id, name: `${id.toLowerCase()}.jsonl` })) : [];
   const listedNames = new Set(listed.map((j) => j.name));
-  for (const { id, name } of listed) {
-    if (!names.includes(name)) at(join(dir, name), `missing: milestone.json lists ${id}`);
-  }
+  const missing = listed.filter(({ name }) => !names.includes(name));
+  const missingMessages = missing.map(({ id }) => `missing: milestone.json lists ${id}`);
+  // A missing file's name comes from its validated id; it is still not
+  // printed when it matches a secret value (then by its place in the list).
+  const missingShown = ({ id, name }) => (nameMatchesSecret(name, rules) ? `<listed file ${manifest.journeys.indexOf(id) + 1}>` : name);
+  capped(missingMessages, 'listed journeys have no file').forEach((m, i) => at(i < MAX_REPORTED_ENTRIES ? join(dirShown, missingShown(missing[i])) : dirShown, m));
   for (const name of names) {
     if (name === MANIFEST || listedNames.has(name) || !regular.has(name)) continue;
     if (manifest) at(pathOf(name), 'not listed in milestone.json: a milestone directory holds only its manifest and the files of the journeys it lists');
@@ -931,7 +1021,6 @@ export function checkMilestone(dirArg, { secrets = new Map() } = {}) {
 
   // Each journey file alone: the listed ones in manifest order, then every
   // other regular .jsonl file.
-  const rules = rulesFor(secrets);
   const alone = new Map();
   const order = [...listed.map((j) => j.name).filter((n) => regular.has(n)), ...names.filter((n) => regular.has(n) && n.endsWith('.jsonl') && !listedNames.has(n))];
   for (const name of order) {
@@ -950,29 +1039,47 @@ export function checkMilestone(dirArg, { secrets = new Map() } = {}) {
   }
 
   if (!manifest || !listed.every((j) => alone.has(j.name))) {
-    notes.push(`${dirArg}: the joined checks were not run: ${manifest ? 'a listed journey file is missing or unreadable' : 'the manifest is missing or bad'}`);
+    notes.push(`${dirLabel}: the joined checks were not run: ${manifest ? 'a listed journey file is missing or unreadable' : 'the manifest is missing or bad'}`);
     return result;
   }
 
-  // The joined passes, over every parsed record (entries), each tagged with
-  // its file and its index in that file. `fired` is shared with the file's
-  // own pass, so a rule a record fired alone (or in an earlier pass) is not
-  // reported again for it.
+  // Every parsed record (entries), each tagged with its file and its index
+  // in that file. `fired` is shared with the file's own pass, so a rule a
+  // record fired alone (or in an earlier pass) is not reported again for
+  // it.
   const tagged = listed.flatMap(({ name }) => alone.get(name).entries.map((e, idx) => ({ ...e, file: name, idx })));
-  const adjacentAlone = (a, b) => a.file === b.file && b.idx === a.idx + 1;
-  const newPairs = (list) => list.slice(1).map((b, i) => [list[i], b]).filter(([a, b]) => !adjacentAlone(a, b));
-  const label = (e) => `${shown(e.file)}:${e.line}`;
-  const report = (what, joinedWhat) => (group, rule) => {
+  const where = (e) => `${shown(e.file)}:${e.line}`;
+  const report = (what, how) => (group, rule) => {
     for (const e of group) e.fired.add(rule.name);
     const last = group[group.length - 1];
-    at(pathOf(last.file), `${rule.name} across the ${what} on ${label(group[0])} - ${label(last)} (${joinedWhat} joined)`, last.line);
+    at(pathOf(last.file), `${rule.name} across the ${what} on ${where(group[0])} - ${where(last)} (${how})`, last.line);
   };
-  checkGroups(newPairs(tagged), rules, report('records', 'texts'));
-  checkGroups(newPairs(tagged.filter((e) => e.type !== 'chapter')), rules, report('records', 'texts'));
-  const titles = tagged.filter((e) => e.type === 'chapter');
-  if (titles.length > 1) checkGroups([titles], rules, report('chapter titles', 'titles'));
+  const adjacentAlone = (a, b) => a.file === b.file && b.idx === a.idx + 1;
+  const newPairs = (list) => list.slice(1).map((b, i) => [list[i], b]).filter(([a, b]) => !adjacentAlone(a, b));
 
-  if (problems.length === 0) result.joined = joinJourneys(listed.map(({ name }) => alone.get(name).records));
+  // The joined stream.
+  const allValid = listed.every(({ name }) => alone.get(name).errors.length === 0);
+  let joined = null;
+  if (allValid) {
+    // Every record of every file is valid, so the joined stream's line n is
+    // tagged[n - 1].
+    joined = joinJourneys(listed.map(({ name }) => alone.get(name).records));
+    const bytes = Buffer.from(joined.map((r) => `${JSON.stringify(r)}\n`).join(''), 'utf8');
+    const v = validateEntries(bytes, { secrets, milestone: true, lineLabel: (n) => where(tagged[n - 1]) });
+    for (const e of v.errors) {
+      const t = tagged[e.line - 1];
+      at(pathOf(t.file), e.message.includes(' across the records on ') ? e.message : `${e.message} (in the joined milestone stream, as step ${e.line - 1})`, t.line);
+    }
+    for (const e of v.entries) for (const name of e.fired) tagged[e.line - 1].fired.add(name);
+  } else {
+    checkGroups(newPairs(tagged), rules, report('records', 'texts joined'));
+  }
+  // The chapter-stripped stream, then the title window.
+  checkGroups(newPairs(tagged.filter((e) => e.type !== 'chapter')), rules, report('records', 'chapters removed'));
+  const titles = tagged.filter((e) => e.type === 'chapter');
+  if (titles.length > 1) checkGroups([titles], rules, report('chapter titles', 'titles joined'));
+
+  if (problems.length === 0) result.joined = joined;
   return result;
 }
 
@@ -1013,12 +1120,16 @@ export function main(argv, { env = process.env, out = console.log, error = conso
     }
     const secrets = secretsFromEnv(names, env);
     for (const f of secretFiles) mergeSecrets(secrets, secretsFromFile(f));
+    // A path as messages name it: printable, and never shown when it
+    // matches a secret rule or value (then by its place among the paths).
+    const rules = rulesFor(secrets);
+    const label = (path, i) => (nameMatchesSecret(path, rules) ? `<argument ${i + 1}>` : printableName(path));
     if (command === 'check-milestone') {
       let failed = 0;
       let files = 0;
       let records = 0;
-      for (const dir of paths) {
-        const r = checkMilestone(dir, { secrets });
+      for (const [i, dir] of paths.entries()) {
+        const r = checkMilestone(dir, { secrets, label: label(dir, i) });
         for (const p of r.problems) error(p.line === null ? `${p.path}: ${p.message}` : `${p.path}:${p.line}: ${p.message}`);
         for (const n of r.notes) error(n);
         if (r.problems.length) failed++;
@@ -1030,12 +1141,13 @@ export function main(argv, { env = process.env, out = console.log, error = conso
     }
     let failed = 0;
     let records = 0;
-    for (const file of paths) {
+    for (const [i, path] of paths.entries()) {
+      const file = label(path, i);
       let bytes;
       try {
-        bytes = readFileSync(file);
+        bytes = readFileSync(path);
       } catch (e) {
-        error(`${file}: cannot read: ${e.code ?? e.message}`);
+        error(`${file}: cannot read: ${e.code ?? 'error'}`);
         failed++;
         continue;
       }
