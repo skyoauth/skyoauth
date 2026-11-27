@@ -8,7 +8,8 @@
 //! §3).
 //!
 //! - the constants and the closed set of codes against the service's
-//!   [`MAX_REQUEST_BYTES`], [`ErrorCode::ALL`], the default challenge
+//!   [`MAX_REQUEST_BYTES`], [`MAX_REVOKED_IDS_PER_REPLY`],
+//!   [`ErrorCode::ALL`], the default challenge
 //!   TTL and the default time limits, whose sum is the operator client's
 //!   default total wait (no server needed);
 //! - every golden request line through a real transport whose store is
@@ -41,7 +42,9 @@ use serde_json::{Map, Value};
 use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::{
     ids::test_support::SequentialIds,
-    local_transport::{ErrorCode, LocalTransport, MAX_REQUEST_BYTES, Settings},
+    local_transport::{
+        ErrorCode, LocalTransport, MAX_REQUEST_BYTES, MAX_REVOKED_IDS_PER_REPLY, Settings,
+    },
     operation::Clock,
     persistence::PgPool,
 };
@@ -106,7 +109,11 @@ fn local_wire_fixture_constants_are_the_services() {
         fixture["framing"]["max_request_bytes"],
         u64::try_from(MAX_REQUEST_BYTES).unwrap()
     );
-    // The client's own cap (the service sets none) holds every golden line.
+    assert_eq!(
+        fixture["framing"]["max_revoked_ids_per_reply"],
+        u64::try_from(MAX_REVOKED_IDS_PER_REPLY).unwrap()
+    );
+    // The client's own cap holds every golden line.
     let max_reply = fixture["framing"]["max_reply_bytes"].as_u64().unwrap();
     for reply in list(&fixture, "golden_replies") {
         assert!(text(reply, "line").len() as u64 <= max_reply);

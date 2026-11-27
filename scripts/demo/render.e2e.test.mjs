@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -185,6 +185,24 @@ describe('render.mjs failures', () => {
     assert.match(r.stderr, /render: cannot launch Chromium for Playwright/);
     assert.match(r.stderr, /npx playwright install --with-deps chromium/);
     assert.equal(existsSync(join(out, 'sample.mp4')), false);
+  });
+
+  it('keeps the raw recording of a failed render in DEMO_KEEP_RAW', () => {
+    const keep = join(TMP, 'keep-raw');
+    const r = cli([SAMPLE, '--out', join(TMP, 'nobrowser-keep')], { PLAYWRIGHT_BROWSERS_PATH: mkdtempSync(join(TMP, 'no-browsers-')), DEMO_KEEP_RAW: keep });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, new RegExp(`render: kept the raw recording in ${keep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(r.stderr, /render: cannot launch Chromium for Playwright/);
+    assert.equal(existsSync(keep), true);
+  });
+
+  it('a DEMO_KEEP_RAW that cannot be written does not hide the render error', () => {
+    const blocker = join(TMP, 'keep-raw-is-a-file');
+    writeFileSync(blocker, 'x');
+    const r = cli([SAMPLE, '--out', join(TMP, 'nobrowser-nokeep')], { PLAYWRIGHT_BROWSERS_PATH: mkdtempSync(join(TMP, 'no-browsers-')), DEMO_KEEP_RAW: join(blocker, 'raw') });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /render: DEMO_KEEP_RAW: could not keep the raw recording in .* \(ENOTDIR\)/);
+    assert.match(r.stderr, /render: cannot launch Chromium for Playwright/);
   });
 
   it('refuses an invalid transcript before recording anything', () => {

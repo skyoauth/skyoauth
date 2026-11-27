@@ -316,7 +316,8 @@ The user asked (2026-11-27) that the videos be part of the release artifacts
 - **Not built yet:** the release job and release assets, which wait for
   these questions. Built: the pipeline only, without journeys (the status
   line above): `demo.yml` renders the sample transcript into run artifacts
-  (`demo-videos-N`, 7 days on a pull request, 90 otherwise) and is not in
+  (`demo-videos-N`, 7 days on a pull request, 90 otherwise; the raw
+  recordings of a failed render, `demo-raw-recordings-N`, 3 days) and is not in
   `CI passed`; the `demo-transcripts` job of `ci.yml` checks the committed
   transcripts and is.
 

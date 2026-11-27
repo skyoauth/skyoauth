@@ -1643,7 +1643,7 @@ describe('input errors', () => {
     ]);
     assert.equal(r.code, 2);
     assert.deepEqual(r.json.input_errors, [
-      '100/junit-scenarios-pg-x86_64-attempt-1: no leg file, and not a known artifact of a non-conformance job (^service-nextest-junit-[1-9]\\d*$, ^service-nextest-root-junit-[1-9]\\d*$, ^rust-coverage$, ^typescript-coverage$, ^conformance-report-[1-9]\\d*$, ^demo-videos-[1-9]\\d*$); its results cannot be placed',
+      '100/junit-scenarios-pg-x86_64-attempt-1: no leg file, and not a known artifact of a non-conformance job (^service-nextest-junit-[1-9]\\d*$, ^service-nextest-root-junit-[1-9]\\d*$, ^rust-coverage$, ^typescript-coverage$, ^conformance-report-[1-9]\\d*$, ^demo-videos-[1-9]\\d*$, ^demo-raw-recordings-[1-9]\\d*$); its results cannot be placed',
     ]);
     assert.deepEqual(r.json.ignored_artifacts, []);
     assert.match(r.out, /\*\*Input errors: this report cannot be trusted \(1\)\.\*\*/);
