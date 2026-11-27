@@ -30,38 +30,72 @@ const sh = (args, opts = {}) => spawnSync('sh', [SCRIPT, ...args], { encoding: '
 
 // The listing `summarize` reads by default: the stdout of `cargo nextest
 // list --message-format oneline --verbose` (nextest 0.9) for a run of the
-// three selections, shortened: the selected tests, then tests of the same
+// four selections, shortened: the selected tests, then tests of the same
 // binaries that the filterset leaves out, which end in ` (skipped)`. The
 // selected tests are the script's REQUIRED ones, one more of each
-// selection (EXTRA, which no check requires by name), and as many made-up
-// ones (FILLER) as bring each selection to its MIN_TESTS.
-// The script's SELECTIONS, as [binary ID, test name prefix] pairs.
+// selection of a prefix (EXTRA, which no check requires by name), and as
+// many made-up ones (FILLER) as bring each selection to its MIN_TESTS.
+// The script's SELECTIONS, as [binary ID, prefix or test name] pairs: a
+// prefix is empty or ends in `::` and selects the tests whose names start
+// with it; anything else is one test's full name, which selects it alone.
+// A binary can have several selections.
 const SELECTIONS = /^SELECTIONS='([^']*)'$/m
   .exec(readFileSync(SCRIPT, 'utf8'))[1]
   .split('\n')
   .map((l) => [l.split(' ')[0], l.split(' ')[1] ?? '']);
+const isPrefix = (prefix) => prefix === '' || prefix.endsWith('::');
+// Whether a test's name (its module path and function) is in a selection
+// with this prefix or name.
+const covers = (prefix, name) => (isPrefix(prefix) ? name.startsWith(prefix) : name === prefix);
+// The index in SELECTIONS of the selection a test `BINARY-ID NAME` is in
+// (-1: none).
+const selectionOfTest = (t) => {
+  const [bin, name] = t.split(' ');
+  return SELECTIONS.findIndex(([b, prefix]) => b === bin && covers(prefix, name));
+};
+const selectionIndex = (bin, prefix) => {
+  const i = SELECTIONS.findIndex(([b, p]) => b === bin && p === prefix);
+  assert.ok(i >= 0, `no selection ${bin} ${prefix}`);
+  return i;
+};
+// A selection's prefix as the script shows it: `PREFIX*`, a test's name
+// as itself, none for every test.
+const shown = (prefix) => (prefix === '' ? '' : isPrefix(prefix) ? `${prefix}*` : prefix);
+// A selection's name in the script's errors and summary, in Markdown, and
+// as plain text (the counts' notice, this self-test's own messages).
+const label = (bin, prefix) => `\`${bin}\`${shown(prefix) ? ` \`${shown(prefix)}\`` : ''}`;
+const plain = (bin, prefix) => `${bin}${shown(prefix) ? ` ${shown(prefix)}` : ''}`;
 const REQUIRED = /^REQUIRED='([^']*)'$/m.exec(readFileSync(SCRIPT, 'utf8'))[1].split('\n');
-// The script's MIN_TESTS, as [binary ID, minimum] pairs.
+// The script's MIN_TESTS, as [binary ID, prefix or test name, minimum]:
+// `BINARY-ID [PREFIX] N`, the number last.
 const MIN_TESTS = /^MIN_TESTS='([^']*)'$/m
   .exec(readFileSync(SCRIPT, 'utf8'))[1]
   .split('\n')
-  .map((l) => [l.split(' ')[0], Number(l.split(' ')[1])]);
-const minOf = (bin) => MIN_TESTS.find(([b]) => b === bin)[1];
+  .map((l) => {
+    const f = l.split(' ');
+    return [f[0], f.slice(1, -1).join(' '), Number(f.at(-1))];
+  });
+const minOf = (bin, prefix) => MIN_TESTS.find(([b, p]) => b === bin && p === prefix)?.[2];
 const EXTRA = [
   'skyoauth-operator::operator local_path::a_relative_path_is_checked_as_its_absolute_form',
   'skyoauth-scenarios::pg harness::socket_path_fixture::socket_path_fixture_outcomes_are_complete',
   'skyoauth-service::local_transport a_socket_path_up_to_the_limit_works',
 ];
-// A test of the selection of this binary that no source has, for a fixture.
-const madeUp = (bin, name) => `${bin} ${SELECTIONS.find(([b]) => b === bin)[1]}${name}`;
-const FILLER = SELECTIONS.flatMap(([bin]) => {
-  const have = [...EXTRA, ...REQUIRED].filter((t) => t.startsWith(`${bin} `)).length;
-  return Array.from({ length: Math.max(0, minOf(bin) - have) }, (_, i) => madeUp(bin, `listed_test_${i}`));
+// A test of the selection of a prefix (its index in SELECTIONS) that no
+// source has, for a fixture; a selection of one test's name has no other.
+const madeUp = (i, name) => {
+  const [bin, prefix] = SELECTIONS[i];
+  assert.ok(isPrefix(prefix), `${bin} ${prefix} selects one test: no other can be in it`);
+  return `${bin} ${prefix}${name}`;
+};
+const FILLER = SELECTIONS.flatMap(([bin, prefix], i) => {
+  const have = [...EXTRA, ...REQUIRED].filter((t) => selectionOfTest(t) === i).length;
+  return Array.from({ length: Math.max(0, minOf(bin, prefix) - have) }, (_, k) => madeUp(i, `listed_test_${k}`));
 });
 const SELECTED = [...EXTRA, ...REQUIRED, ...FILLER];
 const N = SELECTED.length;
-// How many of these tests are in the selection of this binary.
-const inBinary = (bin, tests = SELECTED) => tests.filter((t) => t.startsWith(`${bin} `)).length;
+// How many of these tests are in the selection with this index.
+const inSelection = (i, tests = SELECTED) => tests.filter((t) => selectionOfTest(t) === i).length;
 const LEFT_OUT = [
   'skyoauth-operator::operator challenge::challenge_fixture_envelope_matches_the_crate',
   'skyoauth-operator::operator identity_bounds_and_form',
@@ -96,7 +130,7 @@ function summarize(text, userns = '0', status = '0', list = LISTING, listStatus 
 }
 
 // What nextest 0.9 prints with --no-capture and CARGO_TERM_COLOR=never
-// (the lines the script reads, as in a real run of the three selections
+// (the lines the script reads, as in a real run of the four selections
 // as root): START and PASS lines (the counter padded as nextest pads it),
 // and the summary line, whose skipped count is the tests the filterset
 // leaves out.
@@ -133,14 +167,17 @@ const appended = (r) => {
 // holds `##[` anywhere (TryParse, the old syntax).
 const commands = (stdout) => stdout.split(/\r\n|\r|\n/).filter((l) => l.trimStart().startsWith('::') || l.includes('##['));
 const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const HEADING = '### Root-only tests: `local_transport`, operator `local_path`, `harness::socket_path_fixture`';
-const LT = inBinary('skyoauth-service::local_transport');
-const OP = inBinary('skyoauth-operator::operator');
-const PG = inBinary('skyoauth-scenarios::pg');
+const HEADING = '### Root-only tests: `local_transport`, operator `local_path` and `cli::sign::seed_file_protection_on_unix`, `harness::socket_path_fixture`';
+const SIGN_TEST = 'skyoauth-operator::operator cli::sign::seed_file_protection_on_unix';
+const LT = inSelection(selectionIndex('skyoauth-service::local_transport', ''));
+const OP = inSelection(selectionIndex('skyoauth-operator::operator', 'local_path::'));
+const SIGN = inSelection(selectionIndex('skyoauth-operator::operator', 'cli::sign::seed_file_protection_on_unix'));
+const PG = inSelection(selectionIndex('skyoauth-scenarios::pg', 'harness::socket_path_fixture::'));
 const COUNTS =
-  `- \`skyoauth-service::local_transport\`: ${LT} of ${LT} selected tests ran and passed (MIN_TESTS: ${minOf('skyoauth-service::local_transport')})\n` +
-  `- \`skyoauth-operator::operator\` \`local_path::*\`: ${OP} of ${OP} selected tests ran and passed (MIN_TESTS: ${minOf('skyoauth-operator::operator')})\n` +
-  `- \`skyoauth-scenarios::pg\` \`harness::socket_path_fixture::*\`: ${PG} of ${PG} selected tests ran and passed (MIN_TESTS: ${minOf('skyoauth-scenarios::pg')})\n` +
+  `- \`skyoauth-service::local_transport\`: ${LT} of ${LT} selected tests ran and passed (MIN_TESTS: ${minOf('skyoauth-service::local_transport', '')})\n` +
+  `- \`skyoauth-operator::operator\` \`local_path::*\`: ${OP} of ${OP} selected tests ran and passed (MIN_TESTS: ${minOf('skyoauth-operator::operator', 'local_path::')})\n` +
+  `- \`skyoauth-operator::operator\` \`cli::sign::seed_file_protection_on_unix\`: ${SIGN} of ${SIGN} selected tests ran and passed (MIN_TESTS: ${minOf('skyoauth-operator::operator', 'cli::sign::seed_file_protection_on_unix')})\n` +
+  `- \`skyoauth-scenarios::pg\` \`harness::socket_path_fixture::*\`: ${PG} of ${PG} selected tests ran and passed (MIN_TESTS: ${minOf('skyoauth-scenarios::pg', 'harness::socket_path_fixture::')})\n` +
   `- Required root-only tests (REQUIRED in scripts/ci/root-transport-run.sh): ${REQUIRED.length} of ${REQUIRED.length} ran and passed\n`;
 const requiredError = (t, why) => `::error::required root-only test ${t} did not run: ${why}`;
 
@@ -152,12 +189,14 @@ const KINDS = [
   ['socket path cases were NOT bound by the service', 'fails'],
   ['the owner check needs root: it was NOT tried', 'fails'],
   ['no socket path case was bound by the service: it binds on Linux', 'fails'],
+  ['not root: the other-owner case was NOT tried', 'fails'],
   ['this kernel follows at most', 'warns'],
   ["is not root's, sticky and writable by all: the shared directory was NOT tried in it", 'warns'],
   ['the working directory is too long for a relative socket path', 'warns'],
   ['/proc/self/fd is missing', 'warns'],
   ['a bind without /proc was NOT tested', 'warns'],
   ['a user namespace was denied', 'warns'],
+  ['no mkfifo: the named pipe case was NOT tried', 'warns'],
 ];
 
 // The Rust sources, read once each. `withSources` swaps in other texts
@@ -536,8 +575,13 @@ const workspaceFilesOnce = cached(() => {
   return files;
 });
 const workspaceFiles = () => workspaceFilesOnce('all');
-// Whether every target and module a file is in is in a selection.
-const inSelections = (file) => workspaceFiles().get(file).every(({ bin, path }) => SELECTIONS.some(([b, prefix]) => b === bin && path.startsWith(prefix)));
+// Whether a line of a file, in this function (if any), is in a selection
+// in every target and module the file is in: its module is in a
+// selection's prefix, or the function is the test a selection names.
+const inSelections = (file, f) =>
+  workspaceFiles()
+    .get(file)
+    .every(({ bin, path }) => SELECTIONS.some(([b, prefix]) => b === bin && (isPrefix(prefix) ? path.startsWith(prefix) : f?.test === true && `${path}${f.mods}${f.name}` === prefix)));
 
 // The selections' targets: binary ID and crate root.
 const TARGETS = [
@@ -545,29 +589,36 @@ const TARGETS = [
   ['skyoauth-operator::operator', 'operator/tests/operator.rs'],
   ['skyoauth-scenarios::pg', 'tests/pg.rs'],
 ];
-// The files whose notices are checked: a selection's own modules, and of
-// its target the crate root and the helper modules (`common`, `support`,
-// `harness::*`), each with `selected` when it is in the selection.
-const SCANNED = TARGETS.flatMap(([bin, root]) => {
-  const prefix = SELECTIONS.find(([b]) => b === bin)[1];
+// The files whose notices are checked: a selection's own modules, the
+// file of each test a selection names (`only`: that test's name; of that
+// file, the test and the functions that are no test are checked, not its
+// other tests), and of its target the crate root and the helper modules
+// (`common`, `support`, `harness::*`), each with `selected` when it is in
+// a selection's prefix.
+const SCANNED = [...new Set(TARGETS.map(([bin]) => bin))].flatMap((bin) => {
+  const root = TARGETS.find(([b]) => b === bin)[1];
+  const mine = SELECTIONS.filter(([b]) => b === bin).map(([, prefix]) => prefix);
   return moduleFiles(root)
-    .map((m) => ({ bin, file: m.file, path: m.path, selected: m.path.startsWith(prefix) || (m.path === '' && prefix === '') }))
-    .filter((m) => m.selected || m.path === '' || /^(common|support|harness)::/.test(m.path));
+    .map((m) => {
+      const only = mine.find((name) => !isPrefix(name) && functions(m.file).some((f) => f.test && `${m.path}${f.mods}${f.name}` === name));
+      return { bin, file: m.file, path: m.path, selected: mine.some((prefix) => isPrefix(prefix) && m.path.startsWith(prefix)), ...(only ? { only } : {}) };
+    })
+    .filter((m) => m.selected || m.only || m.path === '' || /^(common|support|harness)::/.test(m.path));
 });
 
-// The tests of a selection that compile in the root step's build: their
-// names as nextest lists them (module path and function), from the test
-// functions (`#[test]`, `#[tokio::test]`) of its target's files whose
-// module path starts with its prefix, leaving out those under a cfg that
-// does not hold there (cfgOn). Every test attribute in those files must be
-// on a function it found, else it throws.
-function sourceTests(bin) {
-  const prefix = SELECTIONS.find(([b]) => b === bin)[1];
+// The tests of a selection (its binary ID and its prefix or test name) that
+// compile in the root step's build: their names as nextest lists them
+// (module path and function), from the test functions (`#[test]`,
+// `#[tokio::test]`) of its target's files whose name it covers (starts
+// with its prefix, or is its test's name), leaving out those under a cfg
+// that does not hold there (cfgOn). Every test attribute in those files
+// must be on a function it found, else it throws.
+function sourceTests(bin, prefix) {
   const root = workspaceTargets().find((t) => t.id === bin).root;
   const names = [];
   const seen = new Set();
   for (const m of moduleFiles(root)) {
-    const fns = functions(m.file).filter((f) => f.test && `${m.path}${f.mods}${f.name}`.startsWith(prefix));
+    const fns = functions(m.file).filter((f) => f.test && covers(prefix, `${m.path}${f.mods}${f.name}`));
     if (fns.length === 0) continue;
     if (seen.has(m.file)) throw new Error(`${m.file} is in ${bin} twice`);
     seen.add(m.file);
@@ -582,16 +633,20 @@ function sourceTests(bin) {
 // test }, the text as printed (continuations joined, `{NAME}` replaced by
 // that constant's value, other placeholders by X), the function around it
 // (with the path of the inline modules it is in), if any, and whether that
-// function is a test.
+// function is a test. In a file of a test a selection names (`only`), the
+// notices of its other tests are left out (they do not run as root), and
+// that test's are `selected`.
 function sourceNotices() {
   const out = [];
-  for (const { bin, file, path, selected } of SCANNED) {
+  for (const { bin, file, path, selected, only } of SCANNED) {
     const consts = Object.fromEntries([...read(file).matchAll(/^const (\w+): (?:&str = "([^"]*)"|\w+ = (\d+));$/gm)].map((m) => [m[1], m[2] ?? m[3]]));
     for (const { text: raw, line } of lexed(file).literals) {
       if (!raw.includes('NOTICE:')) continue;
       const text = raw.replace(/\\\n\s*/g, '').replace(/\\"/g, '"').replace(/\{(\w*)[^}]*\}/g, (_, name) => consts[name] ?? 'X');
       const f = functionAt(file, line);
-      out.push({ file, line, text, bin, path: `${path}${f?.mods ?? ''}`, selected, fn: f?.name, test: f?.test ?? false });
+      const named = only !== undefined && f?.test === true && `${path}${f.mods}${f.name}` === only;
+      if (only !== undefined && !selected && f?.test === true && !named) continue;
+      out.push({ file, line, text, bin, path: `${path}${f?.mods ?? ''}`, selected: selected || named, fn: f?.name, test: f?.test ?? false });
     }
   }
   return out;
@@ -608,7 +663,7 @@ describe('summarize', () => {
         `- nextest: ${SUMMARY} (the listing selects ${N} tests and leaves out 3 of the same binaries)\n` +
         COUNTS +
         '- User namespaces for the runner user (not root; `unshare --user --map-root-user --mount true`): allowed (exit 0)\n' +
-        '- Every selected test ran as root and passed, and none printed a notice: each root-only check of the `local_transport` integration target, of operator `local_path` and of `harness::socket_path_fixture` ran.\n',
+        '- Every selected test ran as root and passed, and none printed a notice: each root-only check of the `local_transport` integration target, of operator `local_path` and `cli::sign::seed_file_protection_on_unix` and of `harness::socket_path_fixture` ran.\n',
     );
   });
 
@@ -797,7 +852,7 @@ describe('summarize', () => {
   const NOTICE_SHAPE = new RegExp(
     '^::notice::Root-only tests: nextest ran (\\d+|\\?) \\(all passed: (yes|no)\\) and skipped \\d+; ' +
       'the listing selects (\\d+|\\?) and leaves out (\\d+|\\?); passed per selection: ' +
-      `(${SELECTIONS.map(([bin, prefix]) => escapeRe(`${bin}${prefix ? ` ${prefix}*` : ''}`) + ' \\d+/\\d+').join(', ')}|\\?); ` +
+      `(${SELECTIONS.map(([bin, prefix]) => escapeRe(plain(bin, prefix)) + ' \\d+/\\d+').join(', ')}|\\?); ` +
       `required root-only tests that ran and passed: (\\d+|\\?) of ${REQUIRED.length}$`,
   );
 
@@ -806,7 +861,7 @@ describe('summarize', () => {
     assert.equal(r.status, 0, r.stdout);
     assert.deepEqual(countNotices(r), [
       `::notice::Root-only tests: nextest ran ${N} (all passed: yes) and skipped 3; the listing selects ${N} and leaves out 3; passed per selection: ` +
-        `skyoauth-service::local_transport ${LT}/${LT}, skyoauth-operator::operator local_path::* ${OP}/${OP}, skyoauth-scenarios::pg harness::socket_path_fixture::* ${PG}/${PG}; ` +
+        `skyoauth-service::local_transport ${LT}/${LT}, skyoauth-operator::operator local_path::* ${OP}/${OP}, skyoauth-operator::operator cli::sign::seed_file_protection_on_unix ${SIGN}/${SIGN}, skyoauth-scenarios::pg harness::socket_path_fixture::* ${PG}/${PG}; ` +
         `required root-only tests that ran and passed: ${REQUIRED.length} of ${REQUIRED.length}`,
     ]);
     assert.equal(r.lines.at(-1), countNotices(r)[0]);
@@ -913,6 +968,7 @@ describe('summarize', () => {
       assert.deepEqual(errors(r).slice(1), [
         `::error::\`skyoauth-service::local_transport\`: 0 of its ${LT} selected tests passed`,
         `::error::\`skyoauth-operator::operator\` \`local_path::*\`: 0 of its ${OP} selected tests passed`,
+        `::error::\`skyoauth-operator::operator\` \`cli::sign::seed_file_protection_on_unix\`: 0 of its ${SIGN} selected tests passed`,
         `::error::\`skyoauth-scenarios::pg\` \`harness::socket_path_fixture::*\`: 0 of its ${PG} selected tests passed`,
         ...REQUIRED.map((t) => requiredError(t, 'no PASS line')),
       ]);
@@ -987,16 +1043,20 @@ describe('summarize', () => {
   });
 
   test('a selection the listing has no test of fails', () => {
-    for (const [gone, name] of [
-      ['skyoauth-scenarios::pg ', '`skyoauth-scenarios::pg` `harness::socket_path_fixture::*`'],
-      ['skyoauth-operator::operator ', '`skyoauth-operator::operator` `local_path::*`'],
-      ['skyoauth-service::local_transport ', '`skyoauth-service::local_transport`'],
+    for (const [bin, prefix, name] of [
+      ['skyoauth-scenarios::pg', 'harness::socket_path_fixture::', '`skyoauth-scenarios::pg` `harness::socket_path_fixture::*`'],
+      ['skyoauth-operator::operator', 'local_path::', '`skyoauth-operator::operator` `local_path::*`'],
+      ['skyoauth-operator::operator', 'cli::sign::seed_file_protection_on_unix', '`skyoauth-operator::operator` `cli::sign::seed_file_protection_on_unix`'],
+      ['skyoauth-service::local_transport', '', '`skyoauth-service::local_transport`'],
     ]) {
-      const selected = SELECTED.filter((t) => !t.startsWith(gone));
+      const i = selectionIndex(bin, prefix);
+      const gone = `${bin} ${prefix}`;
+      const selected = SELECTED.filter((t) => selectionOfTest(t) !== i);
       const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, 3 skipped\n`, '0', '0', listing(selected));
       assert.equal(r.status, 1, gone);
-      // That selection's required tests are not listed either.
-      assert.deepEqual(errors(r), [`::error::the listing selects no test of ${name}`, ...REQUIRED.filter((t) => t.startsWith(gone)).map((t) => requiredError(t, 'not listed'))]);
+      // That selection's required tests are not listed either; the other
+      // selection of the same binary is not affected.
+      assert.deepEqual(errors(r), [`::error::the listing selects no test of ${name}`, ...REQUIRED.filter((t) => selectionOfTest(t) === i).map((t) => requiredError(t, 'not listed'))]);
       assert.match(r.summary, new RegExp(`^- ${escapeRe(name)}: 0 of 0 selected tests ran and passed \\(MIN_TESTS: \\d+\\)$`, 'm'));
       assert.doesNotMatch(r.summary, COMPLETE);
     }
@@ -1006,25 +1066,30 @@ describe('summarize', () => {
   // compiled out) that no check requires by name: every count still
   // agrees, and only MIN_TESTS notices.
   test('a selection that lists fewer tests than its MIN_TESTS fails, naming both numbers; more pass', () => {
-    for (const [bin, prefix] of SELECTIONS) {
-      const gone = FILLER.find((t) => t.startsWith(`${bin} `)) ?? EXTRA.find((t) => t.startsWith(`${bin} `));
+    for (const [i, [bin, prefix]] of SELECTIONS.entries()) {
+      // A selection of one test's name lists it or none (the test above).
+      if (!isPrefix(prefix)) {
+        assert.equal(minOf(bin, prefix), 1, `${bin} ${prefix}`);
+        continue;
+      }
+      const gone = FILLER.find((t) => selectionOfTest(t) === i) ?? EXTRA.find((t) => selectionOfTest(t) === i);
       const selected = SELECTED.filter((t) => t !== gone);
       const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, ${LEFT_OUT.length} skipped\n`, '0', '0', listing(selected));
       assert.equal(r.status, 1, bin);
-      const name = `\`${bin}\`${prefix ? ` \`${prefix}*\`` : ''}`;
-      const min = minOf(bin);
+      const name = label(bin, prefix);
+      const min = minOf(bin, prefix);
       const message = `${name}: the listing selects ${min - 1} tests, fewer than its minimum of ${min} (MIN_TESTS in scripts/ci/root-transport-run.sh): a test was removed, renamed or compiled out`;
       assert.deepEqual(errors(r), [`::error::${message}`]);
       assert.match(r.summary, new RegExp(`^- \\*\\*Failed:\\*\\* ${escapeRe(message)}$`, 'm'));
       assert.match(r.summary, new RegExp(`^- ${escapeRe(name)}: ${min - 1} of ${min - 1} selected tests ran and passed \\(MIN_TESTS: ${min}\\)$`, 'm'));
       assert.doesNotMatch(r.summary, COMPLETE);
       // One more than the minimum passes.
-      const more = [...SELECTED, madeUp(bin, 'a_new_test')];
+      const more = [...SELECTED, madeUp(i, 'a_new_test')];
       const ok = summarize(`${START}${passLines(more)}     Summary [   1.000s] ${more.length} tests run: ${more.length} passed, ${LEFT_OUT.length} skipped\n`, '0', '0', listing(more));
       assert.equal(ok.status, 0, ok.stdout);
     }
     // The fixture lists exactly each minimum.
-    for (const [bin, min] of MIN_TESTS) assert.equal(inBinary(bin), min, bin);
+    for (const [bin, prefix, min] of MIN_TESTS) assert.equal(inSelection(selectionIndex(bin, prefix)), min, `${bin} ${prefix}`);
   });
 
   test('a selected test without a PASS line fails its selection, even when the counts agree', () => {
@@ -1041,10 +1106,14 @@ describe('summarize', () => {
     assert.deepEqual(errors(failed), [`::error::\`skyoauth-operator::operator\` \`local_path::*\`: ${OP - 1} of its ${OP} selected tests passed`]);
   });
 
-  test('a listing that selects a test outside the three selections fails', () => {
+  test('a listing that selects a test outside the four selections fails', () => {
     const outside = [
       'skyoauth-scenarios::pg a01_a_scenario_that_needs_the_database',
       'skyoauth-operator::operator local_path_other::a_test',
+      // A sibling of the one test a selection names, and a test whose name
+      // that test's name starts.
+      'skyoauth-operator::operator cli::sign::an_out_write_that_fails_is_exit_3',
+      'skyoauth-operator::operator cli::sign::seed_file_protection_on_unix_too',
       'skyoauth-scenarios::pg harness::socket_path_fixture_other::a_test',
       'skyoauth-service::local_wire a_test',
     ];
@@ -1052,11 +1121,11 @@ describe('summarize', () => {
       const selected = [...SELECTED, t];
       const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${N + 1} tests run: ${N + 1} passed, 3 skipped\n`, '0', '0', listing(selected));
       assert.equal(r.status, 1, t);
-      assert.deepEqual(errors(r), [`::error::the filterset selects tests outside the three selections: 1 (${t})`]);
+      assert.deepEqual(errors(r), [`::error::the filterset selects tests outside the four selections: 1 (${t})`]);
     }
     const many = Array.from({ length: 7 }, (_, i) => `skyoauth-scenarios::pg a0${i}_x`);
     const r = summarize(`${START}${passLines([...SELECTED, ...many])}     Summary [   1.000s] ${N + many.length} tests run: ${N + many.length} passed, 3 skipped\n`, '0', '0', listing([...SELECTED, ...many]));
-    assert.deepEqual(errors(r), [`::error::the filterset selects tests outside the three selections: 7 (${many.slice(0, 5).join(', ')}, ...)`]);
+    assert.deepEqual(errors(r), [`::error::the filterset selects tests outside the four selections: 7 (${many.slice(0, 5).join(', ')}, ...)`]);
   });
 
   // A profile or filterset change that leaves out a test of a selection:
@@ -1068,16 +1137,21 @@ describe('summarize', () => {
       'skyoauth-operator::operator local_path::the_socket_must_be_the_expected_owners',
       'skyoauth-scenarios::pg harness::socket_path_fixture::socket_path_fixture_cases_match_the_services_bind',
       'skyoauth-service::local_transport the_service_uid_cannot_redirect_a_bind',
+      SIGN_TEST,
     ]) {
       // A sibling that runs takes its place, so that its selection still
-      // lists MIN_TESTS tests and the skipped mark is what fails.
-      const selected = [...SELECTED.filter((t) => t !== dropped), madeUp(dropped.split(' ')[0], 'a_sibling')];
+      // lists MIN_TESTS tests and the skipped mark is what fails; the one
+      // test a selection names has none, so its selection lists no test.
+      const i = selectionOfTest(dropped);
+      const [bin, prefix] = SELECTIONS[i];
+      const selected = [...SELECTED.filter((t) => t !== dropped), ...(isPrefix(prefix) ? [madeUp(i, 'a_sibling')] : [])];
       const leftOut = [...LEFT_OUT, dropped];
       const line = `Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, ${leftOut.length} skipped`;
       const r = summarize(`${START}${passLines(selected)}     ${line}\n`, '0', '0', listing(selected, leftOut));
       assert.equal(r.status, 1, dropped);
       assert.deepEqual(errors(r), [
         `::error::the listing marks 1 tests of the selections as skipped (${dropped}): the filterset leaves out tests it should run`,
+        ...(isPrefix(prefix) ? [] : [`::error::the listing selects no test of ${label(bin, prefix)}`]),
         requiredError(dropped, 'listed as skipped'),
         // The dropped test is not an expected exclusion, so nextest's
         // skipped count is one more than the tests the listing leaves out.
@@ -1094,12 +1168,21 @@ describe('summarize', () => {
   });
 
   test('a skipped test of a selection\'s binary outside its prefix is an expected exclusion', () => {
-    const leftOut = [...LEFT_OUT, 'skyoauth-operator::operator redaction::x', 'skyoauth-operator::operator local_pathology::y', 'skyoauth-scenarios::pg harness::socket_path_fixture_more::z'];
+    // The siblings of the one test a selection names, and a test whose name
+    // that test's name starts, are left out too.
+    const leftOut = [
+      ...LEFT_OUT,
+      'skyoauth-operator::operator redaction::x',
+      'skyoauth-operator::operator local_pathology::y',
+      'skyoauth-scenarios::pg harness::socket_path_fixture_more::z',
+      'skyoauth-operator::operator cli::sign::an_out_write_that_fails_is_exit_3',
+      'skyoauth-operator::operator cli::sign::seed_file_protection_on_unix_too',
+    ];
     const line = `Summary [   1.000s] ${SELECTED.length} tests run: ${SELECTED.length} passed, ${leftOut.length} skipped`;
     const r = summarize(`${START}${passLines()}     ${line}\n`, '0', '0', listing(SELECTED, leftOut));
     assert.equal(r.status, 0, r.stdout);
     assert.deepEqual(annotations(r), []);
-    assert.match(r.summary, new RegExp(`^- nextest: ${escapeRe(line)} \\(the listing selects ${N} tests and leaves out 6 of the same binaries\\)$`, 'm'));
+    assert.match(r.summary, new RegExp(`^- nextest: ${escapeRe(line)} \\(the listing selects ${N} tests and leaves out ${leftOut.length} of the same binaries\\)$`, 'm'));
     assert.match(r.summary, COMPLETE);
   });
 
@@ -1138,7 +1221,7 @@ describe('summarize', () => {
     assert.equal(errors(r).length, 3, r.stdout);
   });
 
-  // Every NOTICE the three selections' sources print, through `summarize`:
+  // Every NOTICE the four selections' sources print, through `summarize`:
   // each is one of the two kinds the script's comment lists, so that a
   // notice added or reworded there is classified here before it can pass
   // as a warning where it should fail the step (or the reverse). The
@@ -1158,11 +1241,12 @@ describe('summarize', () => {
 
   test('the scanned sources are the selections\' modules and their targets\' helpers and crate roots', () => {
     assert.deepEqual(
-      SCANNED.map(({ bin, file, path }) => `${bin} ${file} ${path}`),
+      SCANNED.map(({ bin, file, path, only }) => `${bin} ${file} ${path}${only ? ` only ${only}` : ''}`),
       [
         'skyoauth-service::local_transport service/tests/local_transport.rs ',
         'skyoauth-service::local_transport service/tests/common/mod.rs common::',
         'skyoauth-operator::operator operator/tests/operator.rs ',
+        'skyoauth-operator::operator operator/tests/cli/sign.rs cli::sign:: only cli::sign::seed_file_protection_on_unix',
         'skyoauth-operator::operator operator/tests/local_path/mod.rs local_path::',
         'skyoauth-operator::operator operator/tests/support/mod.rs support::',
         'skyoauth-scenarios::pg tests/pg.rs ',
@@ -1196,19 +1280,21 @@ describe('summarize', () => {
       required.add(`${n.bin} ${n.path}${n.fn}`);
     }
     assert.deepEqual(REQUIRED, [...required].sort());
-    for (const t of REQUIRED) {
-      const [bin, name] = t.split(' ');
-      assert.ok(SELECTIONS.some(([b, prefix]) => b === bin && name.startsWith(prefix)), `${t} is in no selection`);
-    }
+    for (const t of REQUIRED) assert.ok(selectionOfTest(t) >= 0, `${t} is in no selection`);
+    // The one test a selection names is required: its notice fails the step.
+    assert.ok(REQUIRED.includes(SIGN_TEST));
   });
 
   test('a required test that is not listed and did not run fails, by name, though every count agrees', () => {
     for (const gone of REQUIRED) {
-      // Another test in its place: its selection still lists MIN_TESTS.
-      const selected = [...SELECTED.filter((t) => t !== gone), madeUp(gone.split(' ')[0], 'another_test')];
+      // Another test in its place: its selection still lists MIN_TESTS (the
+      // one test a selection names has none: its selection lists none).
+      const i = selectionOfTest(gone);
+      const [bin, prefix] = SELECTIONS[i];
+      const selected = [...SELECTED.filter((t) => t !== gone), ...(isPrefix(prefix) ? [madeUp(i, 'another_test')] : [])];
       const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, ${LEFT_OUT.length} skipped\n`, '0', '0', listing(selected));
       assert.equal(r.status, 1, gone);
-      assert.deepEqual(errors(r), [requiredError(gone, 'not listed')]);
+      assert.deepEqual(errors(r), [...(isPrefix(prefix) ? [] : [`::error::the listing selects no test of ${label(bin, prefix)}`]), requiredError(gone, 'not listed')]);
       assert.match(r.summary, new RegExp(`^- \\*\\*Failed:\\*\\* required root-only test ${escapeRe(gone)} did not run: not listed$`, 'm'));
       assert.match(r.summary, new RegExp(`^- Required root-only tests .*: ${REQUIRED.length - 1} of ${REQUIRED.length} ran and passed$`, 'm'));
       assert.doesNotMatch(r.summary, COMPLETE);
@@ -1236,7 +1322,60 @@ describe('summarize', () => {
       'the owner check needs root',
       'socket path cases were NOT bound by the service',
       'no socket path case was bound by the service',
+      'not root: the other-owner case was NOT tried',
     ]);
+  });
+
+  // A scratch copy of the script, edited, through `summarize` on the
+  // default fixture (which selects the operator's
+  // `cli::sign::seed_file_protection_on_unix`, as the step's filterset does).
+  const withScript = (edit, text = log()) => {
+    const original = readFileSync(SCRIPT, 'utf8');
+    const changed = edit(original);
+    assert.notEqual(changed, original, 'the edit did not apply');
+    const copy = fresh('root-transport-run.sh');
+    writeFileSync(copy, changed);
+    const logFile = fresh('run.log');
+    writeFileSync(logFile, text);
+    const listFile = fresh('run.list');
+    writeFileSync(listFile, LISTING);
+    const summary = fresh('summary.md');
+    writeFileSync(summary, EARLIER);
+    const r = spawnSync('sh', [copy, 'summarize', logFile, '0', '0', listFile, '0'], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, GITHUB_STEP_SUMMARY: summary } });
+    return { ...r, lines: r.stdout.split('\n').filter(Boolean) };
+  };
+
+  test('the selection of the one test the operator\'s second selection names: dropped from SELECTIONS, the step fails', () => {
+    // Out of SELECTIONS, MIN_TESTS and REQUIRED: the listing's test is
+    // outside every selection.
+    const r = withScript((t) =>
+      t
+        .replace(`\n${SIGN_TEST}\n`, '\n')
+        .replace(`\n${SIGN_TEST} 1\n`, '\n')
+        .replace(`REQUIRED='${SIGN_TEST}\n`, "REQUIRED='"),
+    );
+    assert.equal(r.status, 1, r.stdout);
+    assert.deepEqual(errors(r), [`::error::the filterset selects tests outside the four selections: 1 (${SIGN_TEST})`]);
+    // Out of SELECTIONS only: its MIN_TESTS entry has no selection, and
+    // REQUIRED still names it.
+    const only = withScript((t) => t.replace(`\n${SIGN_TEST}\n`, '\n'));
+    assert.equal(only.status, 1, only.stdout);
+    assert.deepEqual(errors(only), [`::error::the filterset selects tests outside the four selections: 1 (${SIGN_TEST})`]);
+  });
+
+  test('the not-root notice of `cli::sign::seed_file_protection_on_unix` fails the step through NOTICE_FAILS, and the mkfifo one warns', () => {
+    const notRoot = 'NOTICE: not root: the other-owner case was NOT tried';
+    const r = summarize(log(notRoot));
+    assert.equal(r.status, 1, r.stdout);
+    assert.deepEqual(errors(r), ['::error::a test printed a notice that its root-only cases did not run (not root: the other-owner case was NOT tried) although the step runs as root with SKYOAUTH_IT_PEER_USER set']);
+    assert.deepEqual(warnings(r), [`::warning::${notRoot}`]);
+    // Without its NOTICE_FAILS line, it would only warn.
+    const without = withScript((t) => t.replace('\nnot root: the other-owner case was NOT tried\'', "'"), log(notRoot));
+    assert.equal(without.status, 0, without.stdout);
+    const fifo = summarize(log('NOTICE: no mkfifo: the named pipe case was NOT tried'));
+    assert.equal(fifo.status, 0, fifo.stdout);
+    assert.deepEqual(errors(fifo), []);
+    assert.doesNotMatch(fifo.summary, COMPLETE);
   });
 });
 
@@ -1254,7 +1393,7 @@ const rootOnlyText = (t) => NOTICE_FAILS.some((f) => t.includes(f)) || /\bPEER_U
 // with or without a notice.
 const ROOT_BRANCH = /\b\w*uid\w*\b[\w().:]*\s*(?:==|!=)\s*(?:0|ROOT_UID)\b|\b(?:0|ROOT_UID)\s*(?:==|!=)\s*[\w().:&]*uid|\bis_root\s*\(/;
 
-// What is root-only outside the three selections, by the test function it
+// What is root-only outside the four selections, by the test function it
 // is in: each entry's `lines` are the source lines found there (trimmed),
 // and its reason says why it need not run in the root step. A finding
 // outside the selections that is not listed here, or listed with other
@@ -1290,8 +1429,9 @@ const ROOT_ALLOWLIST = [
 ];
 
 // Every root-only finding of the workspace's test targets: { file, line,
-// kind, fn, source, selected }, `selected` when every target and module the
-// file is in is in a selection.
+// kind, fn, source, selected }, `selected` when, in every target and module
+// the file is in, its module is in a selection's prefix or its function is
+// the test a selection names.
 function rootOnlyFindings() {
   const out = [];
   for (const [file] of workspaceFiles()) {
@@ -1304,8 +1444,10 @@ function rootOnlyFindings() {
       if (/\bPEER_USER_VAR\b/.test(c)) found.set(k + 1, 'the peer user variable');
       else if (ROOT_BRANCH.test(c) && functionAt(file, k + 1)?.test) found.set(k + 1, 'a branch on root');
     });
-    const selected = inSelections(file);
-    for (const [line, kind] of [...found].sort((a, b) => a[0] - b[0])) out.push({ file, line, kind, fn: functionAt(file, line)?.name, source: lines[line - 1].trim(), selected });
+    for (const [line, kind] of [...found].sort((a, b) => a[0] - b[0])) {
+      const f = functionAt(file, line);
+      out.push({ file, line, kind, fn: f?.name, source: lines[line - 1].trim(), selected: inSelections(file, f) });
+    }
   }
   return out;
 }
@@ -1321,7 +1463,7 @@ function rootOnlyProblems(findings = rootOnlyFindings()) {
   for (const [key, found] of groups) {
     const entry = ROOT_ALLOWLIST.find((e) => `${e.file} ${e.fn}` === key);
     if (!entry) {
-      for (const f of found) out.push(`${f.file}:${f.line}: ${f.kind} outside the three selections (${f.fn ? `fn ${f.fn}` : 'no function'}): ${f.source}: run it in a selection of the root step, or add it to ROOT_ALLOWLIST with the reason it need not run there`);
+      for (const f of found) out.push(`${f.file}:${f.line}: ${f.kind} outside the four selections (${f.fn ? `fn ${f.fn}` : 'no function'}): ${f.source}: run it in a selection of the root step, or add it to ROOT_ALLOWLIST with the reason it need not run there`);
     } else if (JSON.stringify(found.map((f) => f.source).sort()) !== JSON.stringify([...entry.lines].sort())) {
       out.push(`ROOT_ALLOWLIST: ${key}: it lists ${JSON.stringify(entry.lines)}, the source has ${JSON.stringify(found.map((f) => f.source))}`);
     }
@@ -1396,9 +1538,9 @@ function constructProblems() {
 
 // Each selection's tests in the sources against its MIN_TESTS (exact).
 const minProblems = () =>
-  SELECTIONS.flatMap(([bin]) => {
-    const count = sourceTests(bin).length;
-    return count === minOf(bin) ? [] : [`${bin}: ${count} tests in the sources, MIN_TESTS says ${minOf(bin)}: set it to ${count}`];
+  SELECTIONS.flatMap(([bin, prefix]) => {
+    const count = sourceTests(bin, prefix).length;
+    return count === minOf(bin, prefix) ? [] : [`${plain(bin, prefix)}: ${count} tests in the sources, MIN_TESTS says ${minOf(bin, prefix)}: set it to ${count}`];
   });
 
 // Every .rs file under the workspace's members (not under `target`).
@@ -1419,10 +1561,13 @@ const NOT_IN_A_TARGET = {
   'service/build.rs': 'the build script: it is no test target and prints no test output',
   'operator/src/bin/skyoauth-operator/args.rs': OPERATOR_BIN,
   'operator/src/bin/skyoauth-operator/artifact.rs': OPERATOR_BIN,
+  'operator/src/bin/skyoauth-operator/cmd_sign.rs': OPERATOR_BIN,
   'operator/src/bin/skyoauth-operator/cmd_verify_challenge.rs': OPERATOR_BIN,
   'operator/src/bin/skyoauth-operator/cmd_verify_response.rs': OPERATOR_BIN,
   'operator/src/bin/skyoauth-operator/input.rs': OPERATOR_BIN,
   'operator/src/bin/skyoauth-operator/main.rs': OPERATOR_BIN,
+  'operator/src/bin/skyoauth-operator/out_file.rs': OPERATOR_BIN,
+  'operator/src/bin/skyoauth-operator/seed_file.rs': OPERATOR_BIN,
   'operator/src/bin/skyoauth-operator/show.rs': OPERATOR_BIN,
 };
 
@@ -1438,6 +1583,9 @@ const withLineIn = (file, fnName, line) => {
 const firstTest = (file) => functions(file).find((f) => f.test && f.end > f.start + 1).name;
 const OTHER_TARGET = 'service/tests/jwk.rs';
 const OPERATOR_OTHER = 'operator/tests/challenge/mod.rs';
+// The file of the one test a selection names, and that test.
+const SIGN_FILE = 'operator/tests/cli/sign.rs';
+const SIGN_FN = 'seed_file_protection_on_unix';
 
 describe('the workspace\'s Rust sources', () => {
   test('the lexer: comments, nested comments, raw, byte and C strings, chars and lifetimes, escapes', () => {
@@ -1524,10 +1672,10 @@ describe('the workspace\'s Rust sources', () => {
     });
   });
 
-  // A test outside the three selections that says root-only cases
+  // A test outside the four selections that says root-only cases
   // did not run, or branches on root, never runs as root in CI: each one is
   // listed with its reason, so that a new one is a decision.
-  test('every root-only notice or branch outside the three selections is on ROOT_ALLOWLIST, with a reason', (t) => {
+  test('every root-only notice or branch outside the four selections is on ROOT_ALLOWLIST, with a reason', (t) => {
     const findings = rootOnlyFindings();
     assert.deepEqual(rootOnlyProblems(findings), []);
     for (const e of ROOT_ALLOWLIST) assert.ok(e.reason.length > 20, `${e.file} ${e.fn}: no reason`);
@@ -1540,13 +1688,26 @@ describe('the workspace\'s Rust sources', () => {
       t.diagnostic(`${target.id}: ${mine.length} root-only findings, ${inside} in the selections, ${mine.length - inside} allowlisted: ${[...new Set(mine.filter((f) => !f.selected).map((f) => `${f.file} ${f.fn}`))].join('; ') || '-'}`);
     }
     assert.ok(findings.some((f) => f.selected && f.file === 'service/tests/local_transport.rs'));
+    // The one test a selection names: its branch on root and its notice
+    // are in a selection, though its file's other tests are not.
+    assert.deepEqual(
+      findings.filter((f) => f.file === SIGN_FILE).map(({ kind, fn, selected }) => `${kind} ${fn} ${selected}`),
+      [`a branch on root ${SIGN_FN} true`, `root-only text ${SIGN_FN} true`],
+    );
   });
 
   test('a new root-only notice or branch outside the selections fails, and so does a stale entry', () => {
     const swapped = 'service/src/local_transport/socket.rs';
     for (const [texts, re] of [
       // A NOTICE_FAILS notice in another target's test.
-      [{ [OTHER_TARGET]: withLineIn(OTHER_TARGET, firstTest(OTHER_TARGET), '    eprintln!("NOTICE: the owner check needs root: it was NOT tried");') }, /service\/tests\/jwk\.rs:\d+: root-only text outside the three selections .*the owner check needs root/],
+      [{ [OTHER_TARGET]: withLineIn(OTHER_TARGET, firstTest(OTHER_TARGET), '    eprintln!("NOTICE: the owner check needs root: it was NOT tried");') }, /service\/tests\/jwk\.rs:\d+: root-only text outside the four selections .*the owner check needs root/],
+      // Beside the one test a selection names: in a sibling test, or in a
+      // helper of its file, which other tests call too; and that test
+      // renamed, so that no selection names it any more.
+      [{ [SIGN_FILE]: withLineIn(SIGN_FILE, 'an_out_write_that_fails_is_exit_3', '    eprintln!("NOTICE: not root: the other-owner case was NOT tried");') }, /operator\/tests\/cli\/sign\.rs:\d+: root-only text outside the four selections \(fn an_out_write_that_fails_is_exit_3\)/],
+      [{ [SIGN_FILE]: withLineIn(SIGN_FILE, 'an_out_write_that_fails_is_exit_3', '    if rustix::process::geteuid().as_raw() != 0 { return; }') }, /operator\/tests\/cli\/sign\.rs:\d+: a branch on root outside the four selections \(fn an_out_write_that_fails_is_exit_3\)/],
+      [{ [SIGN_FILE]: withLineIn(SIGN_FILE, 'seed_hex', '    eprintln!("NOTICE: running as root: x was NOT run");') }, /operator\/tests\/cli\/sign\.rs:\d+: root-only text outside the four selections \(fn seed_hex\)/],
+      [{ [SIGN_FILE]: edited(SIGN_FILE, `fn ${SIGN_FN}() {`, `fn ${SIGN_FN}_renamed() {`) }, new RegExp(`a branch on root outside the four selections \\(fn ${SIGN_FN}_renamed\\)`)],
       [{ [OTHER_TARGET]: withLineIn(OTHER_TARGET, firstTest(OTHER_TARGET), '    eprintln!("skipped: this needs root");') }, /root-only text outside/],
       [{ [OPERATOR_OTHER]: withLineIn(OPERATOR_OTHER, firstTest(OPERATOR_OTHER), '    if std::env::var("SKYOAUTH_IT_PEER_USER").is_err() { return; }') }, /operator\/tests\/challenge\/mod\.rs:\d+: root-only text outside/],
       [{ [OPERATOR_OTHER]: withLineIn(OPERATOR_OTHER, firstTest(OPERATOR_OTHER), '    let _ = PEER_USER_VAR;') }, /the peer user variable outside/],
@@ -1567,6 +1728,7 @@ describe('the workspace\'s Rust sources', () => {
     // REQUIRED are checked by the other tests): no problem here.
     const lt = 'service/tests/local_transport.rs';
     withSources({ [lt]: withLineIn(lt, firstTest(lt), '    eprintln!("NOTICE: the owner check needs root: it was NOT tried");') }, () => assert.deepEqual(rootOnlyProblems(), []));
+    withSources({ [SIGN_FILE]: withLineIn(SIGN_FILE, SIGN_FN, '    if rustix::process::geteuid().as_raw() != 0 { return; }') }, () => assert.deepEqual(rootOnlyProblems(), []));
   });
 
   test('no notice is built where the literal scan cannot see it; the macros that could are allowlisted', () => {
@@ -1598,23 +1760,45 @@ describe('the workspace\'s Rust sources', () => {
     }
     // An included file's notices are scanned like a module's.
     withSources({ [OTHER_TARGET]: `${read(OTHER_TARGET)}\ninclude!("extra.rs");\n`, 'service/tests/extra.rs': '#[test]\nfn extra() {\n    eprintln!("NOTICE: the owner check needs root: it was NOT tried");\n}\n' }, () =>
-      assert.match(rootOnlyProblems().join('\n'), /service\/tests\/extra\.rs:3: root-only text outside the three selections \(fn extra\)/),
+      assert.match(rootOnlyProblems().join('\n'), /service\/tests\/extra\.rs:3: root-only text outside the four selections \(fn extra\)/),
     );
   });
 
   // MIN_TESTS: exact here, a lower bound in the script (its comment says
   // why), so that it cannot fall behind the sources unnoticed.
   test('MIN_TESTS is each selection\'s test count in the Rust sources, on Linux with all features', (t) => {
-    assert.deepEqual(MIN_TESTS.map(([bin]) => bin), SELECTIONS.map(([bin]) => bin));
-    assert.equal(new Set(SELECTIONS.map(([bin]) => bin)).size, SELECTIONS.length, 'one selection per binary');
-    assert.deepEqual(minProblems(), []);
-    for (const [bin, prefix] of SELECTIONS) {
-      const names = sourceTests(bin);
-      t.diagnostic(`${bin}${prefix ? ` ${prefix}*` : ''}: ${names.length} tests in the sources, MIN_TESTS ${minOf(bin)}`);
-      for (const r of [...REQUIRED, ...EXTRA].filter((x) => x.startsWith(`${bin} `))) assert.ok(names.includes(r.slice(bin.length + 1)), `${r}: not a test of the sources`);
+    // One entry per selection, in its order, keyed by binary ID and prefix
+    // or test name.
+    assert.deepEqual(
+      MIN_TESTS.map(([bin, prefix]) => `${bin} ${prefix}`),
+      SELECTIONS.map(([bin, prefix]) => `${bin} ${prefix}`),
+    );
+    for (const [, , min] of MIN_TESTS) assert.ok(Number.isInteger(min) && min > 0, String(min));
+    // No two selections overlap: a binary's selections have prefixes
+    // neither of which starts the other, and a test a selection names is in
+    // no prefix of its binary.
+    for (const [i, [bin, a]] of SELECTIONS.entries()) {
+      for (const [k, [other, b]] of SELECTIONS.entries()) {
+        if (i === k || bin !== other) continue;
+        assert.notEqual(a, b, `${bin} ${a} twice`);
+        if (isPrefix(b)) assert.ok(!a.startsWith(b), `${bin}: ${a} is in ${b}`);
+      }
     }
+    assert.deepEqual(minProblems(), []);
+    const all = [];
+    for (const [i, [bin, prefix]] of SELECTIONS.entries()) {
+      const names = sourceTests(bin, prefix);
+      t.diagnostic(`${plain(bin, prefix)}: ${names.length} tests in the sources, MIN_TESTS ${minOf(bin, prefix)}`);
+      for (const r of [...REQUIRED, ...EXTRA].filter((x) => selectionOfTest(x) === i)) assert.ok(names.includes(r.slice(bin.length + 1)), `${r}: not a test of the sources`);
+      all.push(...names.map((name) => `${bin} ${name}`));
+    }
+    assert.equal(new Set(all).size, all.length, 'a test in two selections');
+    // The one test a selection names, compiled on Linux under its
+    // `#[cfg(unix)]` (above its `#[test]`).
+    assert.deepEqual(sourceTests('skyoauth-operator::operator', `cli::sign::${SIGN_FN}`), [`cli::sign::${SIGN_FN}`]);
+    assert.deepEqual(functions(SIGN_FILE).find((f) => f.name === SIGN_FN).cfgs, ['unix']);
     // `local_transport` has one test that does not compile on Linux.
-    assert.ok(!sourceTests('skyoauth-service::local_transport').includes('a_socket_path_over_the_limit_is_refused'));
+    assert.ok(!sourceTests('skyoauth-service::local_transport', '').includes('a_socket_path_over_the_limit_is_refused'));
   });
 
   test('a test deleted, compiled out or added in the sources makes MIN_TESTS fail here', () => {
@@ -1628,16 +1812,34 @@ describe('the workspace\'s Rust sources', () => {
     const withLine = (k, text) => [...lines.slice(0, k), text, ...lines.slice(k)].join('\n');
     // Against the sources as they are (the test above checks that they
     // match MIN_TESTS).
-    const min = minOf('skyoauth-operator::operator');
-    const base = sourceTests('skyoauth-operator::operator').length;
-    const fewer = new RegExp(`^skyoauth-operator::operator: ${base - 1} tests in the sources, MIN_TESTS says ${min}: set it to ${base - 1}$`);
+    const min = minOf('skyoauth-operator::operator', 'local_path::');
+    const base = sourceTests('skyoauth-operator::operator', 'local_path::').length;
+    const fewer = new RegExp(`^skyoauth-operator::operator local_path::\\*: ${base - 1} tests in the sources, MIN_TESTS says ${min}: set it to ${base - 1}$`);
     for (const [text, re] of [
       [without(attr), fewer],
       [withLine(attr, '#[cfg(any())]'), fewer],
       [withLine(attr, '#[cfg(not(unix))]'), fewer],
       [`${read(file)}\n#[test]\nfn one_more() {}\n`, new RegExp(`: ${base + 1} tests in the sources, MIN_TESTS says ${min}: set it to ${base + 1}$`)],
     ]) {
-      withSources({ [file]: text }, () => assert.match(minProblems().filter((p) => p.startsWith('skyoauth-operator::operator:')).join('\n'), re));
+      withSources({ [file]: text }, () => assert.match(minProblems().filter((p) => p.startsWith('skyoauth-operator::operator local_path::*:')).join('\n'), re));
+    }
+    // The one test a selection names: deleted, compiled out or renamed,
+    // its selection has no test in the sources (MIN_TESTS 1); the other
+    // selection of its binary is unchanged.
+    {
+      const g = functions(SIGN_FILE).find((x) => x.name === SIGN_FN);
+      const own = read(SIGN_FILE).split('\n');
+      const at = own.slice(0, g.start).findLastIndex((l) => /^\s*#\[test\]$/.test(l));
+      assert.ok(at >= 0 && at >= g.start - 3, 'no #[test] right above it');
+      const none = `skyoauth-operator::operator cli::sign::${SIGN_FN}: 0 tests in the sources, MIN_TESTS says 1: set it to 0`;
+      for (const text of [
+        [...own.slice(0, at), ...own.slice(at + 1)].join('\n'),
+        [...own.slice(0, at), '#[cfg(any())]', ...own.slice(at)].join('\n'),
+        [...own.slice(0, at), '#[cfg(windows)]', ...own.slice(at)].join('\n'),
+        edited(SIGN_FILE, `fn ${SIGN_FN}() {`, `fn ${SIGN_FN}_renamed() {`),
+      ]) {
+        withSources({ [SIGN_FILE]: text }, () => assert.deepEqual(minProblems(), [none]));
+      }
     }
     // A cfg it cannot evaluate, or a test attribute it does not see on a
     // function, throws instead of miscounting.
@@ -1938,7 +2140,9 @@ const selectionOf = (run) => {
   return { flags: flags.trim().split(/\s+/), filter: /^'([^']*)'$/.exec(filter?.trim() ?? '')?.[1] };
 };
 
-const problems = (ci) => {
+// The problems of the job in this ci.yml, against these SELECTIONS (the
+// script's, unless a check passes others).
+const problems = (ci, selections = SELECTIONS) => {
   const out = [];
   const job = jobOf(ci, 'service-nextest');
   if (!job) return ['no service-nextest job'];
@@ -2013,12 +2217,15 @@ const problems = (ci) => {
   const selection = selectionOf(run);
   if (!selection) out.push('no selection array');
   else {
-    const want = SELECTIONS.map(([bin, prefix]) => {
+    // A prefix is `test(/^PREFIX/)`; one test's name, `test(/^NAME$/)`.
+    const want = selections.map(([bin, prefix]) => {
       const [pkg, target] = bin.split('::');
-      return `(package(${pkg}) & binary(${target})${prefix ? ` & test(/^${prefix}/)` : ''})`;
+      return `(package(${pkg}) & binary(${target})${prefix ? ` & test(/^${prefix}${isPrefix(prefix) ? '' : '$'}/)` : ''})`;
     });
     if (selection.filter !== want.join(' | ')) out.push(`the filterset ${JSON.stringify(selection.filter)} is not the script's SELECTIONS ${JSON.stringify(want.join(' | '))}`);
-    const flags = ['--locked', ...SELECTIONS.flatMap(([bin]) => ['-p', bin.split('::')[0]]), ...SELECTIONS.flatMap(([bin]) => ['--test', bin.split('::')[1]]), '--all-features', '--profile', 'ci-root', '--run-ignored', 'all'];
+    // Each binary once, in the order of its first selection.
+    const bins = [...new Set(selections.map(([bin]) => bin))];
+    const flags = ['--locked', ...bins.flatMap((bin) => ['-p', bin.split('::')[0]]), ...bins.flatMap((bin) => ['--test', bin.split('::')[1]]), '--all-features', '--profile', 'ci-root', '--run-ignored', 'all'];
     if (JSON.stringify(selection.flags) !== JSON.stringify(flags)) out.push(`the selection's flags ${JSON.stringify(selection.flags)} are not ${JSON.stringify(flags)}`);
   }
   if (!/^ {10}unshare --user --map-root-user --mount true \|\| userns=\$\?$/m.test(run)) out.push('the user namespace probe is missing or runs as root');
@@ -2057,6 +2264,12 @@ describe('the service-nextest job in ci.yml', () => {
       [(b) => b.replace(' & test(/^harness::socket_path_fixture::/)', ''), /is not the script's SELECTIONS/],
       [(b) => b.replace(/ \| \(package\(skyoauth-scenarios\)[^']*/, ''), /is not the script's SELECTIONS/],
       [(b) => b.replace('test(/^local_path::/)', 'test(/^local_path/)'), /is not the script's SELECTIONS/],
+      // The one test a selection names: dropped, widened to its module or
+      // to the names it starts, or joined to the other operator clause.
+      [(b) => b.replace(' | (package(skyoauth-operator) & binary(operator) & test(/^cli::sign::seed_file_protection_on_unix$/))', ''), /is not the script's SELECTIONS/],
+      [(b) => b.replace('test(/^cli::sign::seed_file_protection_on_unix$/)', 'test(/^cli::sign::/)'), /is not the script's SELECTIONS/],
+      [(b) => b.replace('test(/^cli::sign::seed_file_protection_on_unix$/)', 'test(/^cli::sign::seed_file_protection_on_unix/)'), /is not the script's SELECTIONS/],
+      [(b) => b.replace(' -p skyoauth-operator', ' -p skyoauth-operator -p skyoauth-operator'), /the selection's flags/],
       [(b) => b.replace(' -p skyoauth-scenarios', ''), /the selection's flags/],
       [(b) => b.replace(' --test pg', ''), /the selection's flags/],
       [(b) => b.replace('--all-features --profile ci-root --run-ignored all\n', '--profile ci-root --run-ignored all\n'), /the selection's flags/],
@@ -2093,6 +2306,16 @@ describe('the service-nextest job in ci.yml', () => {
       const changed = inJob(f);
       assert.notEqual(changed, CI, `${re}: the mutation did not apply`);
       assert.match(problems(changed).join('\n'), re);
+    }
+    // SELECTIONS without a selection the filterset has (the one test the
+    // operator's second selection names, or its `local_path`), or with one
+    // more, are out of step with the step too.
+    for (const selections of [
+      SELECTIONS.filter(([, prefix]) => prefix !== 'cli::sign::seed_file_protection_on_unix'),
+      SELECTIONS.filter(([, prefix]) => prefix !== 'local_path::'),
+      [...SELECTIONS, ['skyoauth-operator::operator', 'cli::sign::out_is_created_new_or_not_at_all']],
+    ]) {
+      assert.match(problems(CI, selections).join('\n'), /is not the script's SELECTIONS/);
     }
     // The aggregate job.
     const gate = jobOf(CI, 'ci-passed');

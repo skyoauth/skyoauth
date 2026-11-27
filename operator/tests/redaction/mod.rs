@@ -5,8 +5,8 @@
 //! classified, that nothing under `operator/src` but the deployment-local
 //! client and the binary writes a file or prints, that the signer's key and
 //! request have no way out, that the deployment-local client, once it
-//! exists, never names the signer, and that the binary neither signs nor
-//! writes a file.
+//! exists, never names the signer, and that the binary signs and writes a
+//! file only where `sign` does, never overwriting one.
 
 use std::{
     collections::BTreeSet,
@@ -460,7 +460,8 @@ fn every_top_level_module_is_classified() {
 /// Nothing under `operator/src` but the deployment-local client
 /// (`src/local.rs` or `src/local/`, which talks to a socket and is held to
 /// its own check below) and the binary (`src/bin/`, which reads files and
-/// prints, held to [`the_binary_neither_signs_nor_writes_a_file`])
+/// prints, and writes and signs in `sign` only, held to
+/// [`the_binary_signs_and_writes_only_in_sign`])
 /// touches a file, a writer, the console, the process or its environment,
 /// or the secret scalar: no `std::fs`, `File`, `OpenOptions`, `std::io`,
 /// `print!`, `println!`, `eprint`, `dbg!`, `std::process`, `std::env` or
@@ -541,50 +542,95 @@ fn the_local_client_never_names_the_signer() {
     }
 }
 
-/// The binary (`src/bin/`) checks artifacts only: no source there names
-/// the signer, its request, a signing key, a seed or the secret scalar;
-/// none writes, creates or removes a file, changes a permission or reads
-/// the environment (its only input from the process is its arguments);
-/// none uses `unsafe`, which its `main.rs` forbids; and none prints with a
-/// macro that panics when the output is closed (`print!`, `println!`,
-/// `eprint!`, `eprintln!`, `dbg!`). The check fails if it does not read
-/// the binary's `main.rs`.
+/// The binary's file that signs (`sign`), the one place in it that may
+/// name the signer or `sign_challenge`.
+const BIN_SIGNING_FILE: &str = "cmd_sign.rs";
+
+/// The binary's file that reads the seed file.
+const BIN_SEED_FILE: &str = "seed_file.rs";
+
+/// The binary's file that writes `sign`'s `--out`, the one place in it
+/// that may open a file for writing.
+const BIN_OUT_FILE: &str = "out_file.rs";
+
+/// The binary's files that may name a seed: the flag and its help
+/// (`args.rs`), the documentation of the exit codes (`main.rs`), the
+/// signing and the reading of the seed file.
+const BIN_SEED_NAMING_FILES: [&str; 4] = ["args.rs", "main.rs", BIN_SIGNING_FILE, BIN_SEED_FILE];
+
+/// The binary (`src/bin/`) checks artifacts, and signs in one place only
+/// (relaxed for `sign`, deliberately and narrowly):
+///
+/// - only [`BIN_SIGNING_FILE`] names `SoftwareSigner` or `sign_challenge`,
+///   and only [`BIN_SEED_NAMING_FILES`] name a seed; no source names a
+///   signing key, the `RecoverySigner` trait, its request or the secret
+///   scalar;
+/// - only [`BIN_OUT_FILE`] opens a file to write it (`OpenOptions`), and
+///   only with `create_new(true)`: never `create(true)`, `truncate` or
+///   `append`, so no existing file is overwritten, and synchronizes it
+///   (`sync_all`, which no test can observe); no source writes a file
+///   otherwise (`fs::write`, `File::create`), creates a directory, removes
+///   or renames anything or changes a permission;
+/// - [`BIN_SEED_FILE`] derives nothing and formats nothing with `Debug`,
+///   so the seed's bytes have no way into a message, and it checks the
+///   path without following a link and the opened file again, as the same
+///   file (a swap between the two cannot be tested without a race);
+/// - none reads the environment (its only input from the process is its
+///   arguments), none uses `unsafe`, which its `main.rs` forbids, and none
+///   prints with a macro that panics when the output is closed (`print!`,
+///   `println!`, `eprint!`, `eprintln!`, `dbg!`).
+///
+/// The check fails if it does not read the binary's `main.rs` and each of
+/// the files named above.
 #[test]
-fn the_binary_neither_signs_nor_writes_a_file() {
+fn the_binary_signs_and_writes_only_in_sign() {
     let sources: Vec<(PathBuf, String)> = sources(&source_dir())
         .into_iter()
         .filter(|(path, _)| is_bin(path))
         .collect();
-    assert!(
-        sources
-            .iter()
-            .any(|(path, _)| path.ends_with(Path::new(BINARY).join("main.rs"))),
-        "the binary's main.rs is read"
-    );
+    let file_name = |path: &Path| path.file_name().unwrap().to_str().unwrap().to_owned();
+    for read in [
+        "main.rs",
+        "args.rs",
+        BIN_SIGNING_FILE,
+        BIN_SEED_FILE,
+        BIN_OUT_FILE,
+    ] {
+        assert!(
+            sources
+                .iter()
+                .any(|(path, _)| path.ends_with(Path::new(BINARY).join(read))),
+            "the binary's {read} is read"
+        );
+    }
     assert!(
         sources.iter().any(|(path, text)| path.ends_with("main.rs")
             && text.lines().any(|line| line == "#![forbid(unsafe_code)]")),
         "the binary forbids unsafe code"
     );
     for (path, text) in &sources {
-        for name in [
+        let name = file_name(path);
+        let mut forbidden = vec![
             "SigningKey",
-            "SoftwareSigner",
             "RecoverySigner",
             "SigningRequest",
             "signing_key",
-            "seed",
-            "sign_challenge",
             "to_scalar",
-        ] {
-            assert!(!text.contains(name), "{name} in {}", path.display());
+        ];
+        if name != BIN_SIGNING_FILE {
+            forbidden.extend(["SoftwareSigner", "sign_challenge"]);
+        }
+        if !BIN_SEED_NAMING_FILES.contains(&name.as_str()) {
+            forbidden.push("seed");
+        }
+        for word in forbidden {
+            assert!(!text.contains(word), "{word} in {}", path.display());
         }
         for (number, line) in code_lines(text) {
             let place = format!("{}:{number}: {line}", path.display());
-            for token in [
+            let mut tokens = vec![
                 "fs::write",
                 "File::create",
-                "OpenOptions",
                 "create_dir",
                 "remove_",
                 "rename",
@@ -598,8 +644,45 @@ fn the_binary_neither_signs_nor_writes_a_file() {
                 "println!",
                 "eprint",
                 "dbg!",
-            ] {
+            ];
+            if name != BIN_OUT_FILE {
+                tokens.push("OpenOptions");
+            }
+            if name == BIN_SEED_FILE {
+                tokens.extend(["derive", ":?"]);
+            }
+            for token in tokens {
                 assert!(!line.contains(token), "{token} at {place}");
+            }
+        }
+        if name == BIN_SEED_FILE {
+            // The link check, the recheck of the opened file and its Unix
+            // comparison by device and inode, which no test can reach
+            // without a race.
+            let code = joined_code(text);
+            for token in [
+                "fs::symlink_metadata(path)",
+                "check(&opened,&owner)?;",
+                "same_file(&checked,&opened)",
+                "checked.dev()==opened.dev()&&checked.ino()==opened.ino()",
+            ] {
+                assert!(code.contains(token), "{token} not in {}", path.display());
+            }
+        }
+        if name == BIN_OUT_FILE {
+            let code = joined_code(text);
+            assert!(
+                code.contains(".create_new(true)"),
+                "{} creates its file new",
+                path.display()
+            );
+            assert!(
+                code.contains(".and_then(|()|file.sync_all())"),
+                "{} synchronizes its file before success",
+                path.display()
+            );
+            for token in [".create(true)", "truncate", "append"] {
+                assert!(!code.contains(token), "{token} in {}", path.display());
             }
         }
     }

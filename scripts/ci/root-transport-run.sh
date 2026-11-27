@@ -59,22 +59,31 @@
 #       or has no `PASS` (or `LEAK`) line (one error each, naming it); or
 #       when a notice holds one of the NOTICE_FAILS strings below; else
 #       0. Only a run with none of these and no notice at all is summarized
-#       as complete, and only for what it ran: the three selections (not,
+#       as complete, and only for what it ran: the four selections (not,
 #       say, the service library's own root-only tests). Last, it prints
 #       one `::notice::` annotation with the counts (nextest's, the
 #       listing's, each selection's and REQUIRED's), built from numbers and
 #       the names in SELECTIONS only, never from the log, so that they show
 #       on the check run. Usage errors exit 2.
 #
-# The selections: a binary ID and the prefix of the test names selected in
-# it (none: every test). The step's filterset (.github/workflows/ci.yml)
-# selects exactly these; the self-test checks that the two agree.
+# The selections: a binary ID and the tests selected in it, either the
+# prefix of their names, ending in `::` (none: every test), or one test's
+# full name, which selects that test alone (no `::` at its end). A binary
+# can have several selections; no test is in two. The step's filterset
+# (.github/workflows/ci.yml) selects exactly these (`test(/^PREFIX/)`, or
+# `test(/^NAME$/)` for one test); the self-test checks that the two agree.
+# The operator's `cli::sign::seed_file_protection_on_unix` is one test of
+# its `cli::sign` module: only it, not its siblings, is run as root (its
+# other-owner case needs root; the operator's normal run, not root, runs
+# the rest of it).
 SELECTIONS='skyoauth-service::local_transport
 skyoauth-operator::operator local_path::
+skyoauth-operator::operator cli::sign::seed_file_protection_on_unix
 skyoauth-scenarios::pg harness::socket_path_fixture::'
 #
-# The fewest tests each selection must list: its binary ID (one selection
-# per binary) and a number. A test removed from a selection (deleted,
+# The fewest tests each selection must list: its binary ID, its prefix or
+# test name as in SELECTIONS (none for a selection of every test of its
+# binary) and, last, a number. A test removed from a selection (deleted,
 # renamed out of its prefix, or compiled out with `#[cfg(...)]`) lowers the
 # listing's count, which no other check notices unless the test is in
 # REQUIRED: nextest's counts and the listing's still agree. The script
@@ -84,8 +93,9 @@ skyoauth-scenarios::pg harness::socket_path_fixture::'
 # compile on the runner (Linux on x86_64, `--all-features`), so adding a
 # test means raising its number here, and removing one, lowering it.
 MIN_TESTS='skyoauth-service::local_transport 57
-skyoauth-operator::operator 11
-skyoauth-scenarios::pg 5'
+skyoauth-operator::operator local_path:: 11
+skyoauth-operator::operator cli::sign::seed_file_protection_on_unix 1
+skyoauth-scenarios::pg harness::socket_path_fixture:: 5'
 #
 # The tests that must run and pass, each a binary ID and a test name as
 # the listing prints them: the tests whose notice says that root-only
@@ -94,7 +104,8 @@ skyoauth-scenarios::pg 5'
 # derives this list from the selections' sources: the test around each
 # notice that holds a NOTICE_FAILS string or the peer user variable, or
 # that says it needs root.
-REQUIRED='skyoauth-operator::operator local_path::socket_path_cases_match_check_socket
+REQUIRED='skyoauth-operator::operator cli::sign::seed_file_protection_on_unix
+skyoauth-operator::operator local_path::socket_path_cases_match_check_socket
 skyoauth-operator::operator local_path::the_socket_must_be_the_expected_owners
 skyoauth-scenarios::pg harness::socket_path_fixture::socket_path_fixture_cases_match_the_services_bind
 skyoauth-service::local_transport a_directory_the_service_uid_cannot_list_takes_a_socket
@@ -129,11 +140,15 @@ skyoauth-service::local_transport without_proc_only_a_short_path_of_the_own_uid_
 #     Linux on x86_64, aarch64 and riscv64 only"), printed where the
 #     service does not bind at all; the runner is one where it does, so
 #     here it means none of the cases ran.
+#   - `not root: the other-owner case was NOT tried`: operator
+#     `cli::sign::seed_file_protection_on_unix` ("not root: the
+#     other-owner case was NOT tried"); never printed as root.
 NOTICE_FAILS='SKYOAUTH_IT_PEER_USER
 socket path cases were NOT run: they need root
 the owner check needs root
 socket path cases were NOT bound by the service
-no socket path case was bound by the service'
+no socket path case was bound by the service
+not root: the other-owner case was NOT tried'
 # Every other notice is a warning, in the summary and as an annotation,
 # and keeps the run from being called complete; these are the ones the
 # selections print for a reason that does not depend on root or on the
@@ -145,6 +160,8 @@ no socket path case was bound by the service'
 #     (`a_socket_in_the_systems_tmp_is_refused_as_shared`; the machine's
 #     /tmp); "the working directory is too long for a relative socket path
 #     that fits once absolute: that half was NOT tried".
+#   - operator `cli::sign::seed_file_protection_on_unix`: "no mkfifo: the
+#     named pipe case was NOT tried" (the machine has no `mkfifo`).
 #   - `local_transport`: "/proc/self/fd is missing ..."; "a bind without
 #     /proc was NOT tested ..." (as root: `unshare` is missing, or the mount
 #     namespace or the mount on /proc was denied); "a user namespace was
@@ -322,16 +339,26 @@ summarize() {
                     sub(/ .*/, "", bin[n])
                     prefix[n] = (index(entry, " ") ? substr(entry, index(entry, " ") + 1) : "")
                 }
+                # MIN_TESTS: the key (binary ID and prefix or name, as in
+                # SELECTIONS), then the number, the last field.
                 while ((getline entry < minimum) > 0) {
-                    split(entry, field, " ")
-                    least[field[1]] = field[2]
+                    count = split(entry, field, " ")
+                    key = field[1]
+                    for (k = 2; k < count; k++) key = key " " field[k]
+                    least[key] = field[count]
                 }
                 while ((getline entry < passed) > 0) pass[entry] = 1
                 while ((getline entry < required) > 0) req[++nreq] = entry
             }
+            # The selection a test is in: a prefix (empty, or ending in
+            # `::`) starts its name; any other is its whole name.
             function which(b, t, i) {
-                for (i = 1; i <= n; i++)
-                    if (b == bin[i] && substr(t, 1, length(prefix[i])) == prefix[i]) return i
+                for (i = 1; i <= n; i++) {
+                    if (b != bin[i]) continue
+                    if (prefix[i] == "" || prefix[i] ~ /::$/) {
+                        if (substr(t, 1, length(prefix[i])) == prefix[i]) return i
+                    } else if (t == prefix[i]) return i
+                }
                 return 0
             }
             $0 !~ /^[A-Za-z0-9_-]+::[A-Za-z0-9_-]+ [^ ]/ { print "bad|" $0; next }
@@ -352,7 +379,7 @@ summarize() {
             END {
                 print "selected|" all + 0
                 print "excluded|" excluded + 0
-                for (i = 1; i <= n; i++) print "selection|" bin[i] "|" prefix[i] "|" listed[i] + 0 "|" ok[i] + 0 "|" least[bin[i]] + 0
+                for (i = 1; i <= n; i++) print "selection|" bin[i] "|" prefix[i] "|" listed[i] + 0 "|" ok[i] + 0 "|" least[bin[i] (prefix[i] == "" ? "" : " " prefix[i])] + 0
                 for (i = 1; i <= nreq; i++) {
                     t = req[i]
                     if (t in skippedtest) print "required|" t "|listed as skipped"
@@ -371,7 +398,7 @@ summarize() {
         fi
         outside=$(awk '/^outside\|/ { n++; if (n <= 5) names = names (n > 1 ? ", " : "") substr($0, 9) } END { if (n) print n " (" names (n > 5 ? ", ..." : "") ")" }' "$tmp/listing")
         if [ -n "$outside" ]; then
-            fail "the filterset selects tests outside the three selections: $outside"
+            fail "the filterset selects tests outside the four selections: $outside"
         fi
         skippedmatch=$(awk '/^skippedmatch\|/ { n++; if (n <= 5) names = names (n > 1 ? ", " : "") substr($0, 14) } END { if (n) print n " tests of the selections as skipped (" names (n > 5 ? ", ..." : "") ")" }' "$tmp/listing")
         if [ -n "$skippedmatch" ]; then
@@ -382,7 +409,13 @@ summarize() {
         required_ok=$(sed -n 's/^requiredok|//p' "$tmp/listing")
         while IFS='|' read -r kind bin prefix count ok least; do
             [ "$kind" = selection ] || continue
-            name="\`$bin\`${prefix:+ \`$prefix*\`}"
+            # A prefix is shown as `PREFIX*`, one test's name as itself.
+            case $prefix in
+                '') shown= ;;
+                *::) shown="$prefix*" ;;
+                *) shown=$prefix ;;
+            esac
+            name="\`$bin\`${shown:+ \`$shown\`}"
             if [ "$count" -eq 0 ]; then
                 fail "the listing selects no test of $name"
             else
@@ -394,7 +427,7 @@ summarize() {
                 fi
             fi
             printf -- '- %s: %s of %s selected tests ran and passed (MIN_TESTS: %s)\n' "$name" "$ok" "$count" "$least" >> "$tmp/counts"
-            per="${per:+$per, }$bin${prefix:+ $prefix*} $ok/$count"
+            per="${per:+$per, }$bin${shown:+ $shown} $ok/$count"
         done < "$tmp/listing"
         # The name and the reason are the script's own (REQUIRED, and the
         # three reasons above), never the listing's text.
@@ -426,7 +459,7 @@ summarize() {
         probe="denied (exit $userns)"
     fi
     {
-        echo "### Root-only tests: \`local_transport\`, operator \`local_path\`, \`harness::socket_path_fixture\`"
+        echo "### Root-only tests: \`local_transport\`, operator \`local_path\` and \`cli::sign::seed_file_protection_on_unix\`, \`harness::socket_path_fixture\`"
         echo
         if [ -n "$line" ]; then
             if [ -n "$selected" ]; then
@@ -449,7 +482,7 @@ summarize() {
             echo
             sed 's/^/- /' "$tmp/notices"
         elif [ "$failed" -eq 0 ]; then
-            echo "- Every selected test ran as root and passed, and none printed a notice: each root-only check of the \`local_transport\` integration target, of operator \`local_path\` and of \`harness::socket_path_fixture\` ran."
+            echo "- Every selected test ran as root and passed, and none printed a notice: each root-only check of the \`local_transport\` integration target, of operator \`local_path\` and \`cli::sign::seed_file_protection_on_unix\` and of \`harness::socket_path_fixture\` ran."
         fi
     } > "$tmp/section"
     cat "$tmp/section" >> "$summary"

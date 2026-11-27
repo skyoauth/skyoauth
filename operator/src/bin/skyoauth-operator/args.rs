@@ -1,8 +1,9 @@
 //! The command line, parsed by hand: a command, then its flags, each flag
 //! followed by its value as the next argument (`--flag VALUE`). A flag is
 //! given at most once, every required flag must be given, and a value may
-//! not be empty or begin with `--`. No flag takes a private key, and
-//! nothing is read from the environment or a configuration file.
+//! not be empty or begin with `--`. No flag takes a private key: `sign`
+//! takes the path of a seed file (`--seed-file`), never the seed. Nothing
+//! is read from the environment or a configuration file.
 //!
 //! A refused argument is named by its flag, or by its position when it is
 //! not a flag: no message repeats a value given on the command line.
@@ -15,12 +16,16 @@ use crate::Failure;
 
 /// The text of `--help`.
 pub const HELP: &str = "\
-skyoauth-operator: offline checks of a recovery challenge and its signed response
+skyoauth-operator: checks and signs a recovery challenge offline, and checks
+its signed response
 
 Usage:
   skyoauth-operator verify-challenge --challenge FILE --instance-id ID --epoch N
       [--replacement-identity ID] [--trust-anchor REF] [--new-recovery-key HEX]
       [--now MICROS]
+  skyoauth-operator sign --challenge FILE --seed-file FILE --out FILE
+      --instance-id ID --epoch N --replacement-identity ID --trust-anchor REF
+      --new-recovery-key HEX [--now MICROS]
   skyoauth-operator verify-response --challenge FILE --response FILE --key HEX
   skyoauth-operator --help
 
@@ -33,6 +38,29 @@ them is not given, the output names it and the exit code is 4. Signing
 also needs the signer's key to differ from the plan's new recovery key,
 which this command cannot check.
 
+sign checks the challenge as verify-challenge does, with every value
+required, then signs it with the recovery private key of the seed file and
+writes the response artifact to --out, a new file (mode 0600 on Unix; an
+existing file is never overwritten). The seed file holds the 32-byte seed
+as 64 lowercase hex digits and at most one newline. On Unix it must be a
+regular file, not a symbolic link, owned by the effective user, of mode
+0600 exactly: run sign as the seed file's owner (not with sudo), and never
+install this binary setuid or setgid. That check reads no access control
+list: on macOS an ACL can let others read the seed file or a new --out file
+(inherited from its directory) whatever the mode shows, so remove ACLs from
+the seed file and from the --out directory (ls -le, chmod -N).
+On Windows its protection is NOT checked: keep it where only you can read
+it. The seed is never taken from the command line or the environment,
+never printed, and not wiped from memory.
+
+A refused sign creates no file. A write to --out that fails (exit 3) may
+leave a partial or empty file: remove it. Under a file-size limit
+(ulimit -f) the process may instead be killed by SIGXFSZ, without exiting
+3; the file is then partial or empty too. When only the summary on standard
+output fails (exit 3), --out is complete: check it with verify-response
+before signing again, since a retry at the same path fails while the file
+exists.
+
 verify-response checks the response artifact's signature over the
 challenge with the recovery public key --key (64 lowercase hex digits).
 
@@ -40,18 +68,23 @@ challenge with the recovery public key --key (64 lowercase hex digits).
 epoch; without it the system clock is used. The clock used is printed.
 
 Exit codes: 0 every check passed (verify-challenge: the replacement is
-confirmed), or the help was printed; 1 refused; 2 usage error; 3 a file,
-the clock or the output could not be read or written; 4 (verify-challenge)
-every given check passed, but the replacement is not confirmed.
+confirmed; sign: the response is written), or the help was printed; 1
+refused (sign: also a seed file of at most 128 bytes that is not a seed); 2
+usage error; 3 a file, the clock or the output could not be read or
+written (sign: also a seed file that is not protected as above or is larger
+than 128 bytes, or an --out that exists); 4 (verify-challenge) every given
+check passed, but the replacement is not confirmed.
 ";
 
 /// A command and its flags.
 pub enum Command {
     /// `--help`, `-h` or `help` alone, or `--help` or `-h` where a flag of
-    /// `verify-challenge` or `verify-response` is expected.
+    /// a command is expected.
     Help,
     /// `verify-challenge`.
     VerifyChallenge(VerifyChallenge),
+    /// `sign`.
+    Sign(Sign),
     /// `verify-response`.
     VerifyResponse(VerifyResponse),
 }
@@ -65,6 +98,22 @@ pub struct VerifyChallenge {
     pub trust_anchor: Option<String>,
     pub new_recovery_key: Option<RecoveryPublicKey>,
     pub now: Option<i64>,
+}
+
+/// The flags of `sign`: those of `verify-challenge`, the replacement's
+/// three values required, the seed file and the output file (required:
+/// the response is never written to standard output, where a closed or
+/// redirected descriptor would lose it or bypass the new file's checks).
+pub struct Sign {
+    pub challenge: PathBuf,
+    pub seed_file: PathBuf,
+    pub instance_id: String,
+    pub epoch: i64,
+    pub replacement_identity: String,
+    pub trust_anchor: String,
+    pub new_recovery_key: RecoveryPublicKey,
+    pub now: Option<i64>,
+    pub out: PathBuf,
 }
 
 /// The flags of `verify-response`.
@@ -87,10 +136,23 @@ const NEW_RECOVERY_KEY: &str = "--new-recovery-key";
 const NOW: &str = "--now";
 const RESPONSE: &str = "--response";
 const KEY: &str = "--key";
+const SEED_FILE: &str = "--seed-file";
+const OUT: &str = "--out";
 
 /// The flags of each command.
 const VERIFY_CHALLENGE_FLAGS: [&str; 7] = [
     CHALLENGE,
+    INSTANCE_ID,
+    EPOCH,
+    REPLACEMENT_IDENTITY,
+    TRUST_ANCHOR,
+    NEW_RECOVERY_KEY,
+    NOW,
+];
+const SIGN_FLAGS: [&str; 9] = [
+    CHALLENGE,
+    SEED_FILE,
+    OUT,
     INSTANCE_ID,
     EPOCH,
     REPLACEMENT_IDENTITY,
@@ -157,7 +219,29 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, F
                     .ok_or_else(|| usage(format!("{KEY} is required")))?,
             }))
         }
-        Some(SIGN) => Err(usage("the sign command is not implemented yet")),
+        Some(SIGN) => {
+            let Some(mut given) = Given::read(SIGN, &SIGN_FLAGS, flags)? else {
+                return Ok(Command::Help);
+            };
+            // Every expectation is required: `sign` signs only a confirmed
+            // replacement, and which value is missing is known from the
+            // command line alone, before anything is read.
+            Ok(Command::Sign(Sign {
+                challenge: given.required_path(CHALLENGE)?,
+                seed_file: given.required_path(SEED_FILE)?,
+                out: given.required_path(OUT)?,
+                instance_id: given.required_text(INSTANCE_ID)?,
+                epoch: given
+                    .integer(EPOCH)?
+                    .ok_or_else(|| usage(format!("{EPOCH} is required")))?,
+                replacement_identity: given.required_text(REPLACEMENT_IDENTITY)?,
+                trust_anchor: given.required_text(TRUST_ANCHOR)?,
+                new_recovery_key: given
+                    .key(NEW_RECOVERY_KEY)?
+                    .ok_or_else(|| usage(format!("{NEW_RECOVERY_KEY} is required")))?,
+                now: given.integer(NOW)?,
+            }))
+        }
         _ => Err(usage("unknown command (argument 1)")),
     }
 }
@@ -200,7 +284,10 @@ impl Given {
                 Some((_, value)) if value.is_empty() => {
                     return Err(usage(format!("{flag} has an empty value")));
                 }
-                Some((_, value)) if value.to_str().is_some_and(|v| v.starts_with("--")) => {
+                // The argument's own bytes (the platform's encoding, of
+                // which ASCII is a subset), before any conversion to
+                // UTF-8: a value that is not UTF-8 is refused too.
+                Some((_, value)) if value.as_encoded_bytes().starts_with(b"--") => {
                     return Err(usage(format!("{flag} needs a value")));
                 }
                 Some((_, value)) => value.clone(),

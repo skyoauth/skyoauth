@@ -1,7 +1,8 @@
 # cargo-nextest configuration. CI runs both profiles below, in the
 # `service-nextest` job: `ci` for the workspace tests, then `ci-root` for
 # the root-only run of skyoauth-service's `local_transport` tests,
-# skyoauth-operator's `local_path` tests and skyoauth-scenarios'
+# skyoauth-operator's `local_path` tests and its
+# `cli::sign::seed_file_protection_on_unix` test, and skyoauth-scenarios'
 # `harness::socket_path_fixture` tests. The default profile is left as
 # nextest ships it for local runs.
 
@@ -18,10 +19,11 @@ fail-fast = false
 path = "junit.xml"
 
 # The `service-nextest` job's second run, as root with a second local user,
-# of three selections (see the step "Run the root-only local transport
+# of four root selections (see the step "Run the root-only local transport
 # tests", whose filterset picks them): the `local_transport` integration
-# tests of skyoauth-service, the `local_path` module of skyoauth-operator's
-# `operator` target and the `harness::socket_path_fixture` module of
+# tests of skyoauth-service, the `local_path` module and the
+# `cli::sign::seed_file_protection_on_unix` test of skyoauth-operator's
+# `operator` target, and the `harness::socket_path_fixture` module of
 # skyoauth-scenarios' `pg` target. Same settings as `ci`; its own JUnit
 # path, so it does not overwrite the first run's report. Written to
 # target/nextest/ci-root/junit.xml, uploaded as its own artifact,
