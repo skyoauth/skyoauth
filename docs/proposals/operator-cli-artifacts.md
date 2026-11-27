@@ -49,11 +49,14 @@ carries a recovery challenge from the service's host to the workstation that
 holds the recovery key, and the signed response back. The carrier is two
 files, the artifacts. The binary `skyoauth-operator`, in the
 `skyoauth-operator` package (`operator/src/bin/skyoauth-operator/`), checks
-and signs them offline: the commands of D1 read no socket, no environment
-and no configuration file, and write no file but the one `sign --out` names,
-which `sign` creates new. The online commands of D2, in
-[the online commands proposal](operator-cli-online.md), do read a socket: the
-service's deployment-local one.
+and signs them offline with the three commands below: they read no socket,
+no environment and no configuration file, and write no file but the one
+`sign --out` names, which `sign` creates new. The binary's online commands
+([the online commands proposal](operator-cli-online.md): `bootstrap`,
+`issue-challenge`, `preview`, `restore`, `status`) do read the service's
+deployment-local socket, on the service's host, and `issue-challenge`
+writes the challenge artifact to its own new `--out`; they read no
+environment and no configuration file either.
 
 ## Commands
 
@@ -219,7 +222,8 @@ response is written to `--out` only. (Messages: implementation pick.)
 ## Exit codes
 
 Lead pick; which of `sign`'s failures is 1, 2 or 3 is an implementation
-pick within it (D1b).
+pick within it (D1b). The online commands keep these meanings and add 5 and
+6 ([the online commands proposal](operator-cli-online.md#exit-codes)).
 
 | Code | Meaning |
 | ---- | ------- |

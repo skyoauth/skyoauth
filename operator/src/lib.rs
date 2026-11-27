@@ -24,8 +24,11 @@
 //!   platform; and, Unix only, its client.
 //!
 //! The package's binary, `skyoauth-operator` (`src/bin/`), checks a
-//! challenge artifact and a signed response offline; see
-//! `docs/proposals/operator-cli-artifacts.md`.
+//! challenge artifact and a signed response offline, reading no socket
+//! (see `docs/proposals/operator-cli-artifacts.md`), and, on the service's
+//! host, bootstraps, issues a challenge, previews, restores and reads the
+//! recovery state over the deployment-local socket with [`local`]'s client
+//! (see `docs/proposals/operator-cli-online.md`).
 //!
 //! The crate does not depend on `skyoauth-service`: it builds and tests on
 //! Linux, macOS and Windows without a server or a database (ADR-017 item

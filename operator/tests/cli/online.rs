@@ -1,10 +1,11 @@
-//! The online commands of the binary, `preview` and `status`
-//! (docs/proposals/operator-cli-online.md, slice 1), run as a process.
+//! The online commands of the binary, `bootstrap`, `issue-challenge`,
+//! `preview`, `restore` and `status` (docs/proposals/operator-cli-online.md),
+//! run as a process.
 //!
 //! Portable: the usage errors of the socket flags and of each command's
 //! flags (exit 2, decided before any file is read, on every platform), the
-//! online writes this build does not implement (exit 2), the help; off
-//! Unix, each online command exits 2 with its fixed text and reads no file.
+//! help; off Unix, each online command exits 2 with its fixed text, reads
+//! no file and creates no `--out`.
 //!
 //! Unix (`unix`): a fake service, a `UnixListener` at a socket of mode 0600
 //! in a private 0700 directory, `--service-uid` the directory's owner read
@@ -14,7 +15,11 @@
 //! the real service sent) and checking that each request line received is
 //! the fixture's golden request, byte for byte, and how many connections
 //! were made. Every outcome: each command's output, every member of a
-//! `status` reply, the walk over the pages of revoked IDs (its restart on
+//! `status` reply, the challenge artifact `--out` (the reply line verbatim,
+//! created before the request, left empty on every other outcome), a
+//! restore's `revoked_credential_ids_complete`, each outcome of a write
+//! (exit 1, 5 with the fixed text of what to run, 6, and 3 when its output
+//! fails after it committed), the walk over the pages of revoked IDs (its restart on
 //! the documented tie, and a page mismatch), each refusal code (exit 1),
 //! each unknown reply of the fixture for `preview` and `status` and a
 //! timeout of each wait (exit 6, never 5: they change nothing), each
@@ -66,6 +71,13 @@ fn online<S: AsRef<std::ffi::OsStr>>(arguments: &[S], hidden: &[String]) -> Run 
         2 => assert!(run.stderr.ends_with(HINT), "{run:?}"),
         6 => assert!(
             run.stderr.ends_with(UNCHANGED_NEXT) && run.stdout.is_empty(),
+            "{run:?}"
+        ),
+        // The cause, then what to run instead of repeating the write.
+        5 => assert!(
+            run.stderr.lines().count() >= 2
+                && run.stdout.is_empty()
+                && !run.stderr.contains(UNCHANGED_NEXT),
             "{run:?}"
         ),
         _ => assert!(!run.stderr.contains(UNCHANGED_NEXT), "{run:?}"),
@@ -252,7 +264,92 @@ fn online_usage_errors_are_exit_2() {
             ));
         }
     }
-    let hidden: Vec<String> = ["SENTINEL", "no-such-socket"].map(String::from).to_vec();
+    // The writes: every flag of each is required, and each refuses the
+    // flags of the others; a key that does not parse is named by its flag.
+    let issue_flags = [
+        "--credential-spki",
+        "no-such-spki",
+        "--trust-anchor",
+        "SENTINEL-ANCHOR",
+        "--new-recovery-key",
+        key,
+        "--out",
+        "SENTINEL-OUT",
+    ];
+    let restore_flags = ["--response", "no-such-response"];
+    for (command, flags) in [
+        ("bootstrap", &bootstrap_flags[..]),
+        ("issue-challenge", &issue_flags[..]),
+        ("restore", &restore_flags[..]),
+    ] {
+        for at in (0..flags.len()).step_by(2) {
+            let mut arguments = with_socket(&[command]);
+            for (index, argument) in flags.iter().enumerate() {
+                if index != at && index != at + 1 {
+                    arguments.push(argument);
+                }
+            }
+            cases.push((arguments, format!("{} is required", flags[at])));
+        }
+        let mut arguments = vec![command];
+        arguments.extend(flags);
+        cases.push((arguments, "--socket is required".into()));
+        let mut arguments = vec![command, "--socket", "no-such-socket"];
+        arguments.extend(flags);
+        cases.push((arguments, "--service-uid is required".into()));
+        let mut arguments = with_socket(&[command]);
+        arguments.extend(flags);
+        arguments.extend(["--total-wait", "0"]);
+        cases.push((
+            arguments,
+            "--total-wait is not a whole number of seconds over zero in its shortest decimal form"
+                .into(),
+        ));
+    }
+    for (command, flag) in [
+        ("bootstrap", "--out"),
+        ("bootstrap", "--new-recovery-key"),
+        ("bootstrap", "--response"),
+        ("bootstrap", "--reconcile"),
+        ("issue-challenge", "--instance-id"),
+        ("issue-challenge", "--recovery-key"),
+        ("issue-challenge", "--response"),
+        ("issue-challenge", "--challenge"),
+        ("restore", "--challenge"),
+        ("restore", "--out"),
+        ("restore", "--credential-spki"),
+        ("restore", "--instance-id"),
+    ] {
+        cases.push((
+            with_socket(&[command, flag, "SENTINEL-VALUE"]),
+            format!("{command} has no flag {flag}"),
+        ));
+    }
+    let mut arguments = with_socket(&["bootstrap"]);
+    arguments.extend(&bootstrap_flags[..7]);
+    arguments.push(&key[1..]);
+    cases.push((
+        arguments,
+        "--recovery-key is refused: recovery public key is not 64 lowercase hexadecimal digits"
+            .into(),
+    ));
+    let mut arguments = with_socket(&["issue-challenge"]);
+    arguments.extend(&issue_flags[..5]);
+    arguments.push("C050C5637A44FA8629FFF3CCCCE2300CB362A63D99D95FC54145266F4332445A");
+    arguments.extend(&issue_flags[6..]);
+    cases.push((
+        arguments,
+        "--new-recovery-key is refused: recovery public key is not 64 lowercase hexadecimal \
+         digits"
+            .into(),
+    ));
+    let mut arguments = with_socket(&["restore"]);
+    arguments.extend(restore_flags);
+    arguments.extend(restore_flags);
+    cases.push((arguments, "--response is given more than once".into()));
+    let hidden: Vec<String> = ["SENTINEL", "no-such-socket", "C050C5637A44FA86"]
+        .map(String::from)
+        .to_vec();
     for (arguments, message) in cases {
         let run = online(&arguments, &hidden);
         assert_eq!(
@@ -289,47 +386,21 @@ fn online_usage_errors_are_exit_2() {
     assert!(!run.stderr.contains("--service-uid") && !run.stderr.contains("-wait"));
 }
 
-/// The online writes of the proposal are not implemented in this build:
-/// each is refused as a usage error (exit 2) with a fixed text that says
-/// so, whatever follows it, `--help` included, and nothing is read or
-/// sent.
-#[test]
-fn the_online_writes_are_not_implemented() {
-    for command in ["bootstrap", "issue-challenge", "restore"] {
-        let message = format!(
-            "skyoauth-operator: {command} is not implemented in this build: of the online \
-             commands, only preview and status are; nothing was sent\n{HINT}"
-        );
-        for rest in [
-            vec![],
-            vec!["--help"],
-            vec!["--socket", "no-such-socket", "--service-uid", "1000"],
-            vec!["--response", "no-such-response", "--out", "no-such-out"],
-        ] {
-            let mut arguments = vec![command];
-            arguments.extend(rest);
-            let run = online(&arguments, &[]);
-            assert_eq!(
-                run,
-                Run {
-                    code: 2,
-                    stdout: String::new(),
-                    stderr: message.clone(),
-                },
-                "{arguments:?}"
-            );
-        }
-    }
-}
-
-/// The help names both online commands, Unix only, their socket flags and
-/// the exit codes 5 and 6, and says the writes are not implemented; it is
-/// printed for `--help` or `-h` where a flag of either is expected.
+/// The help names the five online commands, Unix only, their socket flags
+/// and the exit codes 5 and 6 (an issue-challenge of unknown outcome is
+/// issued again, never reconciled); it is printed for `--help` or `-h` where a
+/// flag of any is expected (never as a value).
 #[test]
 fn the_help_names_the_online_commands() {
     let help = online(&["--help"], &[]);
     assert_eq!(help.code, 0);
+    assert!(!help.stdout.contains("not implemented"), "{help:?}");
     for text in [
+        "skyoauth-operator bootstrap SOCKET --instance-id ID --credential-spki FILE\n      \
+         --trust-anchor REF --recovery-key HEX",
+        "skyoauth-operator issue-challenge SOCKET --credential-spki FILE\n      \
+         --trust-anchor REF --new-recovery-key HEX --out FILE",
+        "skyoauth-operator restore SOCKET --response FILE",
         "skyoauth-operator preview SOCKET --response FILE",
         "skyoauth-operator status SOCKET [--challenge FILE | --response FILE]",
         "skyoauth-operator status SOCKET --reconcile restore",
@@ -339,9 +410,15 @@ fn the_help_names_the_online_commands() {
         "[--total-wait SECONDS] [--idle-wait SECONDS]",
         "(Unix only)",
         "--total-wait (default 100) and --idle-wait (default 10)",
-        "bootstrap, issue-challenge and restore are not implemented in this build",
-        "; 5 the outcome of\na write is unknown",
-        "; 6\nnothing was changed",
+        "issue-challenge creates --out, a new\nfile",
+        "revoked_credential_ids_complete: yes or no",
+        "On a\nplatform without Unix sockets, the online commands exit 2.",
+        "; 5 the outcome of a write\n(bootstrap, issue-challenge, restore) is unknown: do not \
+         repeat a\nbootstrap or a restore, reconcile first as the message says; an\n\
+         issue-challenge cannot be reconciled: issue again;",
+        "; a 5 stays 5, and a write that succeeded whose standard error\ncannot be written \
+         either is 5)",
+        "; 6 nothing was changed",
     ] {
         assert!(help.stdout.contains(text), "{text}: {help:?}");
     }
@@ -350,19 +427,61 @@ fn the_help_names_the_online_commands() {
         vec!["preview", "--socket", "x", "-h"],
         vec!["status", "-h"],
         vec!["status", "--reconcile", "restore", "--help"],
+        vec!["bootstrap", "--help"],
+        vec!["bootstrap", "--instance-id", "x", "-h"],
+        vec!["issue-challenge", "-h"],
+        vec!["issue-challenge", "--out", "x", "--help"],
+        vec!["restore", "--help"],
+        vec!["restore", "--socket", "x", "--service-uid", "1", "-h"],
     ] {
         assert_eq!(online(&arguments, &[]), help, "{arguments:?}");
     }
+    // `-h` as a value is a value: here a socket path, refused later.
+    let run = online(&["restore", "--socket", "-h"], &[]);
+    assert_eq!(run.code, 2, "{run:?}");
+    assert_ne!(run.stdout, help.stdout);
 }
 
 /// Off Unix, an online command is parsed with its flags, as everywhere,
 /// and then refused with exit 2 and its fixed text, before any file is
-/// read (the files named do not exist: a read would be exit 3).
+/// read (the files named do not exist: a read would be exit 3) and before
+/// `issue-challenge` creates its `--out`.
 #[cfg(not(unix))]
 #[test]
 fn online_commands_exit_2_without_unix_sockets() {
     let socket = ["--socket", "no-such-socket", "--service-uid", "1000"];
+    let key = "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a";
+    let dir = super::TempDir::new();
+    let out = dir.0.join("challenge");
+    let out = out.to_str().unwrap();
     for (command, rest) in [
+        (
+            "bootstrap",
+            vec![
+                "--instance-id",
+                "019a9f3c-5b2e-7c41-9d8e-0000000c1001",
+                "--credential-spki",
+                "no-such-spki",
+                "--trust-anchor",
+                "deployment/operator-ca",
+                "--recovery-key",
+                key,
+            ],
+        ),
+        (
+            "issue-challenge",
+            vec![
+                "--credential-spki",
+                "no-such-spki",
+                "--trust-anchor",
+                "deployment/operator-ca",
+                "--new-recovery-key",
+                key,
+                "--out",
+                out,
+            ],
+        ),
+        ("restore", vec!["--response", "no-such-response"]),
         ("preview", vec!["--response", "no-such-response"]),
         ("status", vec![]),
         (
@@ -396,6 +515,7 @@ fn online_commands_exit_2_without_unix_sockets() {
             "{arguments:?}"
         );
     }
+    assert!(!std::path::Path::new(out).exists(), "--out was created");
 }
 
 #[cfg(unix)]
