@@ -252,10 +252,13 @@ impl Op {
 /// end of the stream, which the failed end never sent: a server that
 /// closed before it can have answered with a refusal, never a success.
 ///
-/// The line is written one `write` at a time. Before each (its wait set
-/// again), before the flush and before the end of the write half, what is
-/// left of [`Timeouts::total`] is checked: once the total has run out (the
-/// caller has then given up), nothing more is sent. A wait
+/// The line is written in chunks of at most 4 KiB, one `write` each.
+/// Before each (its wait set again), before the flush and before the end of
+/// the write half, what is left of [`Timeouts::total`] is checked: once the
+/// total has run out (the caller has then given up), nothing more is sent.
+/// (A socket's send timeout bounds each wait within a send, not the whole
+/// send, on macOS and the BSDs: a large line offered at once to a slow
+/// server could still be written long after the total.) A wait
 /// the stream refuses ends the call: before the first write as
 /// [`NotSent::Setup`], after it as [`UnknownOutcome::ConnectionLost`]. On
 /// macOS a socket refuses every option once its peer has closed, a refusal
@@ -603,12 +606,16 @@ fn sent<S: HalfClose>(
     }
 }
 
-/// Writes `line` one `write` at a time and flushes, the wait of the first
-/// write already set: before each later write, and before the flush, what
-/// is left of the total is checked and the wait set again, so that nothing
-/// is sent once the total has run out and no write blocks past it. The
-/// kind of a failure other than a timeout is returned, and the writing
-/// stops (see [`note`]).
+/// The most one write offers the stream (see [`LocalClient`], "Exchange").
+const WRITE_CHUNK: usize = 4096;
+
+/// Writes `line` and flushes, one write of at most [`WRITE_CHUNK`] bytes at
+/// a time, the wait of the first write already set: before each later
+/// write, and before the flush, what is left of the total is checked and
+/// the wait set again, so that nothing is sent once the total has run out
+/// and no write blocks past it. A write that takes nothing is a lost
+/// connection ([`io::ErrorKind::WriteZero`]). The kind of a failure other
+/// than a timeout is returned, and the writing stops (see [`note`]).
 fn write_line<S: HalfClose>(
     stream: &mut S,
     line: &[u8],
@@ -617,7 +624,8 @@ fn write_line<S: HalfClose>(
 ) -> Result<Option<io::ErrorKind>, UnknownOutcome> {
     let mut rest = line;
     loop {
-        match stream.write(rest) {
+        let chunk = rest.get(..WRITE_CHUNK).unwrap_or(rest);
+        match stream.write(chunk) {
             Ok(0) => return note(Err(io::ErrorKind::WriteZero.into()), None),
             Ok(written) => rest = rest.get(written..).unwrap_or_default(),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
