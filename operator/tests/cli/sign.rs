@@ -895,6 +895,9 @@ fn an_out_write_that_fails_is_exit_3() {
         .arg(BINARY)
         .args(sign_arguments(&op.challenge, &op.seed, &flags, &out))
         .stdin(Stdio::null())
+        // A coverage build writes its profile at exit, which `ulimit -f 0`
+        // would fail and report on standard error.
+        .env("LLVM_PROFILE_FILE", "/dev/null")
         .output()
     else {
         eprintln!("NOTICE: no sh: the failing --out write was NOT tried");
