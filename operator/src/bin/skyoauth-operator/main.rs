@@ -1,0 +1,140 @@
+//! `skyoauth-operator`: the offline operator command line (T13.10; the
+//! artifact formats and exit codes are in
+//! `docs/proposals/operator-cli-artifacts.md`).
+//!
+//! Two commands, both offline and read-only:
+//!
+//! - `verify-challenge` reads a challenge artifact (the `issue_challenge`
+//!   reply line, verbatim), checks it with
+//!   [`parse_challenge`](skyoauth_operator::recovery::parse_challenge) and
+//!   [`check_challenge`](skyoauth_operator::recovery::check_challenge)
+//!   against the flags given, and prints the restoration plan for the
+//!   operator to compare, with whether the replacement was confirmed;
+//! - `verify-response` checks a response artifact's signature over the
+//!   challenge with a recovery public key, as the service's restore checks
+//!   it ([`verify_response`](skyoauth_operator::recovery::verify_response)).
+//!
+//! `sign` is not implemented yet: it is a usage error (exit 2).
+//!
+//! Results go to standard output, errors to standard error, both
+//! deterministic for the same arguments and files (the system clock aside,
+//! which `--now` replaces). Nothing reads the environment, writes a file or
+//! shows a signature; no command takes a private key.
+//!
+//! Exit codes: [`EXIT_OK`], [`EXIT_REFUSED`], [`EXIT_USAGE`], [`EXIT_IO`].
+
+#![forbid(unsafe_code)]
+
+mod args;
+mod artifact;
+mod cmd_verify_challenge;
+mod cmd_verify_response;
+mod input;
+mod show;
+
+use std::{
+    io::{self, Write},
+    process::ExitCode,
+};
+
+use args::Command;
+
+/// Every check passed.
+const EXIT_OK: u8 = 0;
+
+/// An artifact was refused: a check failed, or an artifact is not what it
+/// must be.
+const EXIT_REFUSED: u8 = 1;
+
+/// The command line is wrong: an unknown command or flag, a flag missing,
+/// repeated or without a value, a value that does not parse.
+const EXIT_USAGE: u8 = 2;
+
+/// A file could not be read (missing, not a regular file, too large,
+/// unreadable), the system clock could not be read, or the output could not
+/// be written.
+const EXIT_IO: u8 = 3;
+
+/// Why a command did not succeed, with its fixed message. The message
+/// never holds a signature, a key given on the command line or a value of
+/// an artifact.
+#[derive(Debug, PartialEq, Eq)]
+enum Failure {
+    /// [`EXIT_REFUSED`].
+    Refused(String),
+    /// [`EXIT_USAGE`].
+    Usage(String),
+    /// [`EXIT_IO`].
+    Io(String),
+}
+
+impl Failure {
+    const fn code(&self) -> u8 {
+        match self {
+            Self::Refused(_) => EXIT_REFUSED,
+            Self::Usage(_) => EXIT_USAGE,
+            Self::Io(_) => EXIT_IO,
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Refused(message) | Self::Usage(message) | Self::Io(message) => message,
+        }
+    }
+}
+
+/// What a command prints on standard output, and how it ended. The output
+/// is printed in both cases: a refused challenge still shows its plan.
+struct Outcome {
+    output: String,
+    result: Result<(), Failure>,
+}
+
+impl From<Failure> for Outcome {
+    fn from(failure: Failure) -> Self {
+        Self {
+            output: String::new(),
+            result: Err(failure),
+        }
+    }
+}
+
+fn run(command: Command) -> Outcome {
+    match command {
+        Command::Help => Outcome {
+            output: args::HELP.to_owned(),
+            result: Ok(()),
+        },
+        Command::VerifyChallenge(flags) => cmd_verify_challenge::run(&flags),
+        Command::VerifyResponse(flags) => cmd_verify_response::run(&flags),
+    }
+}
+
+fn main() -> ExitCode {
+    let outcome = match args::parse(std::env::args_os().skip(1)) {
+        Ok(command) => run(command),
+        Err(failure) => failure.into(),
+    };
+    let mut code = match &outcome.result {
+        Ok(()) => EXIT_OK,
+        Err(failure) => failure.code(),
+    };
+    let mut stdout = io::stdout().lock();
+    if stdout
+        .write_all(outcome.output.as_bytes())
+        .and_then(|()| stdout.flush())
+        .is_err()
+    {
+        code = code.max(EXIT_IO);
+    }
+    if let Err(failure) = &outcome.result {
+        let mut text = format!("skyoauth-operator: {}\n", failure.message());
+        if matches!(failure, Failure::Usage(_)) {
+            text.push_str("Run `skyoauth-operator --help` for the usage.\n");
+        }
+        // Nothing more can be reported when standard error fails.
+        let _ = io::stderr().lock().write_all(text.as_bytes());
+    }
+    ExitCode::from(code)
+}

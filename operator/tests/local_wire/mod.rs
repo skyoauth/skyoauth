@@ -7,7 +7,10 @@
 //! reply the client must take as an unknown outcome, the size limits, the
 //! escapes against `serde_json`'s, and the redaction of every type.
 //!
-//! Unix only, like the module. No socket: the codec has no I/O.
+//! Unix only, with `local_path` and `local_exchange`, whose helpers it
+//! reads (the codec itself is built on every platform and also reached, off
+//! Unix, through the binary's tests in `cli`). No socket: the codec has no
+//! I/O.
 
 use std::collections::BTreeSet;
 
