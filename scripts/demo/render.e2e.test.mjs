@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -177,12 +177,15 @@ describe('render.mjs failures', () => {
   };
   // An ffmpeg that passes render.mjs's tool checks and fails at blackdetect,
   // after the browser has written the raw recording: a real failed render.
-  const failingFfmpeg = () => {
-    const real = sh('sh', ['-c', `command -v ${FFMPEG}`], { encoding: 'utf8' }).stdout.trim();
+  // Returns the environment to run the render with. The real ffmpeg's path
+  // reaches the shell only as an argument ($1) and an environment variable,
+  // never inside the script's source, so any path works.
+  const failingFfmpeg = (ffmpeg = FFMPEG) => {
+    const real = sh('sh', ['-c', 'command -v -- "$1"', 'sh', ffmpeg], { encoding: 'utf8' }).stdout.trim();
     assert.ok(real, 'ffmpeg not found');
     const fake = join(TMP, 'ffmpeg-fails-at-blackdetect');
-    writeFileSync(fake, `#!/bin/sh\ncase "$*" in *blackdetect*) echo "fake ffmpeg: no blackdetect" >&2; exit 1;; esac\nexec '${real}' "$@"\n`, { mode: 0o755 });
-    return fake;
+    writeFileSync(fake, '#!/bin/sh\ncase "$*" in *blackdetect*) echo "fake ffmpeg: no blackdetect" >&2; exit 1;; esac\nexec "$DEMO_TEST_REAL_FFMPEG" "$@"\n', { mode: 0o755 });
+    return { FFMPEG: fake, DEMO_TEST_REAL_FFMPEG: real };
   };
   // A one-caption transcript: a few seconds of recording.
   const short = () => {
@@ -191,6 +194,23 @@ describe('render.mjs failures', () => {
     return path;
   };
   const re = (s) => new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+
+  it('the failing ffmpeg works from a path with a space and quotes in it', () => {
+    const real = sh('sh', ['-c', 'command -v -- "$1"', 'sh', FFMPEG], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(real, 'ffmpeg not found');
+    const odd = join(TMP, `dir with space 'single' "double" $HOME`);
+    mkdirSync(odd);
+    const linked = join(odd, "ff'mpeg");
+    symlinkSync(real, linked);
+    const env = failingFfmpeg(linked);
+    assert.equal(env.DEMO_TEST_REAL_FFMPEG, linked);
+    const ok = sh(env.FFMPEG, ['-version'], { encoding: 'utf8', env: { ...process.env, ...env } });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /^ffmpeg version/);
+    const fails = sh(env.FFMPEG, ['-vf', 'blackdetect'], { encoding: 'utf8', env: { ...process.env, ...env } });
+    assert.equal(fails.status, 1);
+    assert.match(fails.stderr, /fake ffmpeg: no blackdetect/);
+  });
 
   it('fails with a clear message when ffmpeg is missing', () => {
     const out = join(TMP, 'noffmpeg');
@@ -222,7 +242,7 @@ describe('render.mjs failures', () => {
 
   it('keeps the raw recording of a render that failed after recording', () => {
     const keep = join(TMP, 'keep-raw');
-    const r = cli([short(), '--out', join(TMP, 'failed-keep')], { FFMPEG: failingFfmpeg(), DEMO_KEEP_RAW: keep });
+    const r = cli([short(), '--out', join(TMP, 'failed-keep')], { ...failingFfmpeg(), DEMO_KEEP_RAW: keep });
     assert.equal(r.status, 1);
     assert.match(r.stderr, re(`render: kept the raw recording in ${keep}`));
     assert.match(r.stderr, /render: ffmpeg blackdetect failed \(exit 1\)/);
@@ -233,7 +253,7 @@ describe('render.mjs failures', () => {
   it('a DEMO_KEEP_RAW that cannot be written does not hide the render error', () => {
     const blocker = join(TMP, 'keep-raw-is-a-file');
     writeFileSync(blocker, 'x');
-    const r = cli([short(), '--out', join(TMP, 'failed-nokeep')], { FFMPEG: failingFfmpeg(), DEMO_KEEP_RAW: join(blocker, 'raw') });
+    const r = cli([short(), '--out', join(TMP, 'failed-nokeep')], { ...failingFfmpeg(), DEMO_KEEP_RAW: join(blocker, 'raw') });
     assert.equal(r.status, 1);
     assert.match(r.stderr, /render: DEMO_KEEP_RAW: could not keep the raw recording in .* \(ENOTDIR\)/);
     assert.match(r.stderr, /render: ffmpeg blackdetect failed \(exit 1\)/);

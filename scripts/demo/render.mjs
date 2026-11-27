@@ -37,7 +37,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import timing from './timing.js';
-import { recordsFromBytes, secretsFromEnv, secretsFromFile } from './transcript.mjs';
+import { mergeSecrets, recordsFromBytes, secretsFromEnv, secretsFromFile } from './transcript.mjs';
 import { toVtt } from './vtt.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -169,14 +169,16 @@ export function publishFiles({ outDir, name, bytes, records }) {
 // DEMO_KEEP_RAW=<dir>: copies the raw recording directory of a failed
 // render into `dest`. Never throws, so a failed copy cannot replace the
 // render's own error: returns a line saying what happened. A render that
-// failed before the browser wrote a recording keeps nothing (and does not
-// create `dest`).
+// failed before the browser wrote a recording (an empty or missing raw
+// directory) keeps nothing and does not create `dest`; a raw directory
+// that cannot be read is reported as such, never as an empty one.
 export function keepRawRecording(rawDir, dest) {
-  let written = [];
+  let written;
   try {
     written = readdirSync(rawDir);
-  } catch {
-    // An unreadable raw directory holds nothing to keep.
+  } catch (e) {
+    if (e.code !== 'ENOENT') return `DEMO_KEEP_RAW: could not read the raw recording directory (${e.code ?? 'error'}), nothing kept`;
+    written = [];
   }
   if (written.length === 0) return 'DEMO_KEEP_RAW: no raw recording was written, nothing kept';
   try {
@@ -190,7 +192,7 @@ export function keepRawRecording(rawDir, dest) {
 
 export async function render(transcriptPath, outDir, { secretEnv = [], secretFiles = [], env = process.env, log = console.log, warn = console.error } = {}) {
   const secrets = secretsFromEnv(secretEnv, env);
-  for (const f of secretFiles) for (const [k, v] of secretsFromFile(f)) secrets.set(k, v);
+  for (const f of secretFiles) mergeSecrets(secrets, secretsFromFile(f));
   // The one read of the transcript: validation, playback, the captions, the
   // published copy and its checksum all use this snapshot, so a file
   // changed during the render cannot publish unchecked bytes.

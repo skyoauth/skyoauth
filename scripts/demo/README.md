@@ -37,7 +37,12 @@ refused. CI passes every `tests/conformance/fixtures/**/*.test-key.json`.
 A message names such a value by the file and its key path
 (`recovery.test-key.json keys[0].seed`); a key name that is not plain
 `[A-Za-z0-9_]` is shown by its position in its object (`<key 2>`), never
-as itself.
+as itself. That position counts in JavaScript property order (as
+`Object.keys` lists the parsed object: integer-like keys such as `"1"`
+first, in ascending order, then the others in file order), not file order.
+No value is dropped: a key repeated in one object (which `JSON.parse` would
+keep only once) and a label shared by two files of the same name keep every
+value, the later ones labelled `#2`, `#3`, ...
 
 ## Transcript format
 
@@ -145,8 +150,9 @@ that each caption appears exactly at its cue's start.
 ## Chapters and milestone videos (designed, not built)
 
 One video per milestone, joined from per-journey transcripts with a
-`chapter` record per journey, chapter tracks (WebVTT and mp4) and one merged
-`SHA256SUMS`: the design is section 6 of
+`chapter` record per journey, chapter tracks (WebVTT and mp4), a generated
+opening commit caption, staged publication and one merged `SHA256SUMS`: the
+design is section 6 of
 [the proposal](../../docs/proposals/demo-walkthroughs.md#6-chapters-and-one-video-per-milestone-design-not-built),
 for the lead's review. None of it is implemented yet.
 

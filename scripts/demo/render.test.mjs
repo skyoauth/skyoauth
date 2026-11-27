@@ -94,6 +94,17 @@ describe('DEMO_KEEP_RAW', () => {
     assert.equal(existsSync(dest), false);
   });
 
+  it('a raw directory that cannot be read is reported as that, not as an empty one', () => {
+    // A file where the directory should be: readdir fails with ENOTDIR (a
+    // permission error, EACCES, takes the same path; as root it cannot be
+    // provoked with chmod).
+    const notADir = join(TMP, 'raw-is-a-file');
+    writeFileSync(notADir, 'x');
+    const dest = join(TMP, 'kept-unreadable');
+    assert.equal(keepRawRecording(notADir, dest), 'DEMO_KEEP_RAW: could not read the raw recording directory (ENOTDIR), nothing kept');
+    assert.equal(existsSync(dest), false);
+  });
+
   it('render() reports the copy and rethrows its own error', () => {
     const source = readFileSync(join(HERE, 'render.mjs'), 'utf8');
     const handler = /\} catch \(e\) \{\n([\s\S]*?)\n  \} finally \{/.exec(source.slice(source.indexOf('export async function render(')));

@@ -128,11 +128,16 @@ export const BEARER_AUTH_PARAMS = ['realm', 'scope', 'error', 'error_description
 //   - an Authorization or Proxy-Authorization field (any case, as a header
 //     `Authorization: Bearer x` or a JSON/YAML key `"authorization": "Bearer
 //     x"`, also JSON-escaped `{\"authorization\": \"Bearer x\"}`) whose
-//     Bearer value is not exactly <redacted> (the value ends at a blank,
-//     quote, backslash, comma or semicolon), an empty value included: no
-//     heuristic applies there. In a joined form (`joined`) the value need
-//     only start with <redacted>, since the join may glue the next line or
-//     record to it; each record alone was already held to the exact value;
+//     Bearer value is not exactly <redacted>, an empty value included: no
+//     heuristic applies there. The value ends at a blank, quote, comma,
+//     semicolon, or a backslash that starts a JSON escape (\" \' \\ \/ \b \f
+//     \n \r \t \u); any other backslash is part of it (`Bearer
+//     <redacted>\a1b2` is refused). When the value is quoted (`"Bearer`,
+//     `\"Bearer`), a JSON escape after it other than the closing quote
+//     continues the same string (`"Bearer <redacted>\nabc"`) and is refused.
+//     In a joined form (`joined`) the value need only start with <redacted>,
+//     since the join may glue the next line or record to it; each record
+//     alone was already held to the exact value;
 //   - anywhere else, the scheme name (any case), blanks, then a token68
 //     value that, once trailing sentence punctuation (. -) is dropped, holds
 //     a digit or one of _ ~ + / =, or is 16 characters or longer. Not a
@@ -144,8 +149,11 @@ export const BEARER_AUTH_PARAMS = ['realm', 'scope', 'error', 'error_description
 //     JSON-escaped, \") or a token character. Any other name=... is a padded token
 //     (`Bearer dGhpc2lz=`, `Bearer a1b2=c3`).
 export function hasBearerCredential(text, { joined = false } = {}) {
-  for (const m of text.matchAll(/\b(?:proxy-)?authorization\\?["']?[ \t]*[:=][ \t]*\\?["']?bearer\b[ \t]*([^\s"',;\\]*)/gi)) {
-    if (joined ? !m[1].startsWith(REDACTED) : m[1] !== REDACTED) return true;
+  for (const m of text.matchAll(/\b(?:proxy-)?authorization\\?["']?[ \t]*[:=][ \t]*(\\?["'])?bearer\b[ \t]*((?:[^\s"',;\\]|\\(?!["'\\/bfnrtu]))*)/gi)) {
+    const [, quote, value] = m;
+    if (joined ? !value.startsWith(REDACTED) : value !== REDACTED) return true;
+    const rest = text.slice(m.index + m[0].length);
+    if (quote && rest.startsWith('\\') && !rest.startsWith(quote)) return true;
   }
   for (const m of text.matchAll(/\bbearer[ \t]+([A-Za-z0-9._~+/-]+)(=*)/gi)) {
     const rest = text.slice(m.index + m[0].length);
@@ -170,10 +178,17 @@ export function hasLongBase64url(text) {
 // differently from its bytes).
 const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
 
-// The 0-based offset of the first JSON syntax error in `text` (a small
-// RFC 8259 scanner), or -1 when it is valid. Used instead of JSON.parse's
-// message, which can quote the input.
-export function jsonErrorOffset(text) {
+// A small RFC 8259 scanner. Parses `text` into plain values, except that an
+// object is a JsonObject holding every [key, value] entry in file order,
+// duplicate keys included (JSON.parse keeps only the last one). Throws the
+// 0-based offset of the first syntax error (a number), never the text.
+export class JsonObject {
+  constructor(entries) {
+    this.entries = entries;
+  }
+}
+
+export function scanJson(text) {
   let i = 0;
   const ws = () => {
     while (i < text.length && ' \t\n\r'.includes(text[i])) i++;
@@ -183,6 +198,7 @@ export function jsonErrorOffset(text) {
   };
   const string = () => {
     if (text[i] !== '"') fail();
+    const from = i;
     i++;
     while (i < text.length && text[i] !== '"') {
       const c = text.charCodeAt(i);
@@ -198,6 +214,7 @@ export function jsonErrorOffset(text) {
     }
     if (i >= text.length) fail();
     i++;
+    return JSON.parse(text.slice(from, i));
   };
   const value = () => {
     ws();
@@ -205,41 +222,62 @@ export function jsonErrorOffset(text) {
     if (c === '{') {
       i++;
       ws();
-      if (text[i] === '}') return void i++;
+      const entries = [];
+      if (text[i] === '}') {
+        i++;
+        return new JsonObject(entries);
+      }
       for (;;) {
         ws();
-        string();
+        const key = string();
         ws();
         if (text[i] !== ':') fail();
         i++;
-        value();
+        entries.push([key, value()]);
         ws();
         if (text[i] === ',') i++;
-        else if (text[i] === '}') return void i++;
-        else fail();
+        else if (text[i] === '}') {
+          i++;
+          return new JsonObject(entries);
+        } else fail();
       }
     } else if (c === '[') {
       i++;
       ws();
-      if (text[i] === ']') return void i++;
+      const items = [];
+      if (text[i] === ']') {
+        i++;
+        return items;
+      }
       for (;;) {
-        value();
+        items.push(value());
         ws();
         if (text[i] === ',') i++;
-        else if (text[i] === ']') return void i++;
-        else fail();
+        else if (text[i] === ']') {
+          i++;
+          return items;
+        } else fail();
       }
-    } else if (c === '"') string();
+    } else if (c === '"') return string();
     else {
       const m = /^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(text.slice(i));
       if (!m) fail();
       i += m[0].length;
+      return JSON.parse(m[0]);
     }
   };
+  const result = value();
+  ws();
+  if (i !== text.length) fail();
+  return result;
+}
+
+// The 0-based offset of the first JSON syntax error in `text`, or -1 when
+// it is valid. Used instead of JSON.parse's message, which can quote the
+// input.
+export function jsonErrorOffset(text) {
   try {
-    value();
-    ws();
-    if (i !== text.length) fail();
+    scanJson(text);
     return -1;
   } catch (at) {
     if (typeof at !== 'number') throw at;
@@ -508,9 +546,33 @@ export function secretsFromEnv(names, env = process.env) {
 // as `keys[].seed`.
 export const SECRET_KEYS = new Set(['seed', 'private_key', 'secret', 'password']);
 
+// Adds one secret to `secrets` (label -> value) without ever replacing
+// one: a label already taken by another value moves the new one to
+// `label #2`, `label #3`, ...; the same value under the same label is kept
+// once.
+function addSecret(secrets, label, value) {
+  let at = label;
+  for (let n = 2; secrets.has(at); n++) {
+    if (secrets.get(at) === value) return;
+    at = `${label} #${n}`;
+  }
+  secrets.set(at, value);
+}
+
+// Adds the secrets of `source` (label -> value) to `target` without ever
+// replacing one: two inputs with the same display label (two files of the same
+// name in different directories) keep every value, the later ones under
+// `label #2`, `label #3`, ...
+export function mergeSecrets(target, source) {
+  for (const [label, value] of source) addSecret(target, label, value);
+  return target;
+}
+
 // Collects the secret values of a JSON file: label -> value. Throws a usage
 // error when the file cannot be read or parsed, names no secret, or holds a
-// value too short to check.
+// value too short to check. A key that appears twice in one object keeps
+// both values (JSON.parse would keep only the last): the file is read with
+// scanJson, which keeps every entry.
 export function secretsFromFile(path) {
   let content;
   try {
@@ -520,24 +582,37 @@ export function secretsFromFile(path) {
   }
   let json;
   try {
-    json = JSON.parse(content);
-  } catch {
-    throw new UsageError(`--secret-file ${path}: not JSON${jsonErrorPosition(content)}`);
+    json = scanJson(content);
+  } catch (at) {
+    if (typeof at !== 'number') throw at;
+    throw new UsageError(`--secret-file ${path}: not JSON at character ${at + 1}`);
   }
   const secrets = new Map();
   // A key name is part of a label (messages, rule names) only when it is
   // plain ([A-Za-z0-9_]); any other name could hold anything, so it is
-  // shown by its 1-based position in its object instead: <key 3>.
+  // shown by its 1-based position in its object instead: <key 3>. The
+  // position is in JavaScript property order (what Object.keys gives for
+  // the parsed object: integer-like keys first, in ascending order, then
+  // the others in file order), not file order; a repeated key counts once,
+  // at its first place.
   const segment = (k, i) => (/^[A-Za-z0-9_]+$/.test(k) ? k : `<key ${i + 1}>`);
   const walk = (node, at) => {
     if (Array.isArray(node)) node.forEach((x, i) => walk(x, `${at}[${i}]`));
-    else if (node !== null && typeof node === 'object') {
-      for (const [i, [k, v]] of Object.entries(node).entries()) {
+    else if (node instanceof JsonObject) {
+      const byKey = new Map();
+      for (const [k, v] of node.entries) {
+        if (!byKey.has(k)) byKey.set(k, []);
+        byKey.get(k).push(v);
+      }
+      const keys = Object.keys(Object.fromEntries([...byKey.keys()].map((k) => [k, true])));
+      for (const [i, k] of keys.entries()) {
         const here = at ? `${at}.${segment(k, i)}` : segment(k, i);
-        if (SECRET_KEYS.has(k) && typeof v === 'string') {
-          if (v.length < MIN_SECRET_LENGTH) throw new UsageError(`--secret-file ${path}: ${here} is shorter than ${MIN_SECRET_LENGTH} characters`);
-          secrets.set(`${basename(path)} ${here}`, v);
-        } else walk(v, here);
+        for (const v of byKey.get(k)) {
+          if (SECRET_KEYS.has(k) && typeof v === 'string') {
+            if (v.length < MIN_SECRET_LENGTH) throw new UsageError(`--secret-file ${path}: ${here} is shorter than ${MIN_SECRET_LENGTH} characters`);
+            addSecret(secrets, `${basename(path)} ${here}`, v);
+          } else walk(v, here);
+        }
       }
     }
   };
@@ -573,7 +648,7 @@ export function main(argv, { env = process.env, out = console.log, error = conso
     }
     if (files.length === 0) throw new UsageError('no transcript given (an empty list is refused, so a glob that matched nothing fails)');
     const secrets = secretsFromEnv(names, env);
-    for (const f of secretFiles) for (const [k, v] of secretsFromFile(f)) secrets.set(k, v);
+    for (const f of secretFiles) mergeSecrets(secrets, secretsFromFile(f));
     let failed = 0;
     let records = 0;
     for (const file of files) {
