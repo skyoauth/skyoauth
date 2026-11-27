@@ -23,8 +23,8 @@ tour of the same behaviour for a person who will not read the tests.
   is the only thing that gates a release; a demo that passes proves nothing the
   scenarios do not. A demo script that diverges from its scenarios is a bug in
   the demo.
-- **Is not committed:** the video is a CI or release artifact (size), the
-  scripts and the renderer are in git.
+- **Is not committed:** the video is a release asset (section 5), never in git
+  (size); the scripts and the renderer are in git.
 
 ## 1. The critical user journeys per milestone
 
@@ -134,9 +134,8 @@ Where it lives (**open to the lead**, no new crate without approval): the
 scripts as a `demo` test target of the existing `skyoauth-scenarios` crate,
 run only when `SKYOAUTH_DEMO_OUT` names a directory, so that `cargo nextest`
 never runs them in the normal jobs; the player and the render script under
-`scripts/demo/` (Node, as `scripts/ci/`); a manual and a release-tag workflow
-that produce the mp4 files as artifacts. Not committed: the mp4 files and the
-transcripts' generated output.
+`scripts/demo/` (Node, as `scripts/ci/`); a manual workflow for a trial run and the release job of section 5.
+Not committed: the mp4 files and the transcripts' generated output.
 
 ## 3. What is demoable now
 
@@ -167,6 +166,38 @@ the player are built once, against M1a-5.
 - **Lead:** the review of this proposal, the journey lists, the crate placement
   and the approval of the workflows.
 
+## 5. The videos as release assets
+
+The user asked (2026-11-27) whether the videos can be part of the release
+artifacts. They can, as follows (**lead pick** for the details; the principle
+is the user's).
+
+- **What is published:** on each tagged release, one mp4 per milestone that the
+  release contains (a release that does not contain M3 has no M3 video), the
+  **deterministic JSONL transcripts** each video was rendered from, and a
+  **SHA-256 checksum file** over the mp4 files and the transcripts. They are
+  release assets, not files in git. GitHub's limit for a release asset
+  (2 GiB each) is no constraint at the expected size.
+- **How they are built:** the release job renders them from the **tagged
+  commit**, against a real service and a private PostgreSQL, with the runner of
+  section 2. A trial run of the same job is available manually before a tag.
+- **The consistency rule:** a release MUST NOT publish a video whose transcript
+  differs from the transcript that CI compared on that commit (section 2,
+  determinism). The release job therefore takes the CI transcript for the
+  commit, re-runs the journeys, requires the two to be byte-identical, and
+  renders only then; a difference fails the release job and publishes no video.
+- **Redaction still applies:** no key, signature or credential bytes in a
+  transcript, a caption or a video frame, with the same redaction check, which
+  runs on the release job's transcripts too.
+- **Dependencies, both open:** the release manifest format and the gate-job
+  rulings 7a to 7d (the lead rules on them when the first M1a gate is close; the
+  demo assets are added to the manifest then), and ADR-024 OQ-ADR024-1 (whether
+  the usable M2 slice is a tagged release, which decides whether there is an M2
+  video of its own). Until both are ruled, this section fixes the principle and
+  the rules above, not the manifest entries.
+- **Not in this PR:** no workflow or CI code; the release job is built after the
+  manifest format is ruled.
+
 ## Decisions requested
 
 Open user questions:
@@ -176,9 +207,9 @@ Open user questions:
    regenerated from a transcript without a recording.
 2. Length: one video per milestone of about five minutes, or one per journey?
    **Lead pick:** one per milestone, with chapter markers per journey.
-3. Where the videos are published: a CI artifact only, a release asset, or an
-   external host? **Lead pick:** release asset of the tag that passes the
-   milestone's gate, retained as a CI artifact otherwise.
+3. Where the videos are published: **decided** by the user (2026-11-27), as
+   release assets of each tagged release (section 5); an external host stays
+   open only if the user wants a second copy.
 4. Whether a viewer outside the project sees them, which sets how strict the
    redaction check is (**lead pick:** strict in all cases).
 
