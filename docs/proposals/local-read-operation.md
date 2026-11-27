@@ -134,14 +134,18 @@ The type notation is the fixture's, with `|null` for a nullable member
 
 A `RecoveryState` row whose `bootstrap_closed` is false still counts as
 closed (identity-registry :298-299), so `instance_id` and the other state
-members report it; any `operation_id` asked against such a row is
-`server_error` (F10), since no restore can run against it
-(`NoRecoveryState`, `recovery.rs:1521-1527`).
+members report it (F10). Such a row is a dead end: a bootstrap is
+refused as `AlreadyClosed`, and a restore needs a closed state
+(`NoRecoveryState`, `recovery.rs:1521-1527`). Making it unrepresentable
+(`CHECK (bootstrap_closed)` in a new migration) is a schema change for the
+user, tracked as a follow-up that the lead takes to the user.
 
 ### Operation states
 
-Decided in this order against the rows the read statement sees (lead
-ruling, F1; state names inferred):
+Checked before the state table: an `operation_id` asked against an
+unclosed state row is `server_error` (F10). Otherwise the state is decided
+in this order against the rows the read statement sees (lead ruling, F1;
+state names inferred):
 
 | State | Condition | Final? |
 | ----- | --------- | ------ |
@@ -152,7 +156,7 @@ ruling, F1; state names inferred):
 | `issued` | unconsumed, unrevoked, bound, `server_time < expires_at` | no |
 | `expiring` | as `issued`, but `expires_at <= server_time < settles_at` | no: a restore that took its `now` before the expiry may still be running |
 | `expired` | as `issued`, but `server_time >= settles_at` | no (below) |
-| any other combination (consumed with outcome `issued`, say, which only a write by other means leaves), or no closed state row | `server_error` (inferred) | |
+| any other combination (consumed with outcome `issued`, say, which only a write by other means leaves), or no state row at all | `server_error` (inferred) | |
 
 `restored` comes before `revoked` because `0005` lets a consumed operation
 be revoked later (`0005_operator.sql:323-327`, :459-460), and the restore's
@@ -201,7 +205,8 @@ contract amendment 2 below.
   the transport's timeouts, always rolled back, as `preview`
   (`ops.rs:455-486`). Never `READ ONLY` and never on a replica: the barrier
   takes a row lock, which PostgreSQL refuses in a read-only transaction
-  and on a standby (PostgreSQL's documented behaviour; not verified). It
+  and on a standby (the `READ ONLY` refusal of `FOR SHARE` reproduced on
+  PostgreSQL 16 by the reviewer; the standby refusal not verified). It
   changes no row. It draws no ID (lead ruling, F7).
 - **The mutex.** It takes the transport's mutex like every request
   (`connection.rs:160-164`; `mod.rs:304-321`), so in one process it runs
@@ -212,8 +217,12 @@ contract amendment 2 below.
   (`recovery.rs:1521-1524`), and `FOR SHARE` conflicts with it, so `status`
   waits for any restore, from any process, that has locked the state,
   including one whose client connection was discarded while PostgreSQL
-  still finishes its `COMMIT`. The rollback to the savepoint releases the
-  lock at once (PostgreSQL's documented behaviour; not verified). The wait
+  still finishes its `COMMIT` (that last case not verified). Reproduced on
+  PostgreSQL 16 by the reviewer: `FOR SHARE` waits for `FOR NO KEY UPDATE`
+  (`FOR KEY SHARE` would not); the rollback to the savepoint releases the
+  lock and the barrier still waits first; a new `FOR SHARE` overtakes a
+  restore already waiting for `FOR NO KEY UPDATE` behind another holder. The
+  wait
   is bounded by `lock_timeout` (`auth_unavailable`). Held for the whole
   request instead, the shared lock of overlapping `status` calls from
   several processes could keep a restore waiting for its exclusive lock
@@ -248,7 +257,10 @@ client still never retries on its own (`operator/src/local/mod.rs:75`):
   restores, or is `not_restorable` because the first one committed, which
   the next `status` shows. `expiring`: ask again after `settles_at`.
   `expired`: it did not commit through this transport; issue a new
-  challenge (the old one is not final in the contract's sense, above).
+  challenge (the old one is not final in the contract's sense, above). This
+  corrects itself: if the old challenge is restored after all, it rotates
+  the epoch, so the new one's restore is `not_restorable` and `status` on
+  the old one shows `restored`.
 - **bootstrap, outcome unknown (lead ruling, F4):** `status` with the
   bootstrap's `credential_spki`, the same DER bytes it sent.
   - `instance_id` equal to the one sent, `enrolled_state` not `not_found`,
@@ -351,7 +363,10 @@ constant in the service, pinned in the fixture as
   JSON string; 1000 of them, with the other members at their worst, are
   about 1.54 MB, 37% of the client's 4 MiB. 2700 would be the most (about
   99%). The `status` reply adds at most a 16 KiB recovery key in hex (the
-  database allows 8192 bytes, `0005_operator.sql:200-202`) and two more IDs.
+  database allows 8192 bytes, `0005_operator.sql:200-202`) and three more
+  IDs (`instance_id` and the two `enrolled_` IDs): about 1,559,065 bytes at
+  its worst, 37.2% (the reviewer's figure; the author's estimate is within
+  a few bytes).
 - 1000 is round and far above any plausible number of operator credentials
   (inferred).
 
@@ -369,14 +384,20 @@ therefore those whose `revoked_at` equals the operation's `consumed_at`.
 
 The registry function of Q1 computes the count and a page with that
 predicate. The restore reply takes its count and first page from it too,
-run inside the restore's transaction after step 6 (after
-`restore_operator` returns and before the commit), not from the revoke
-statement's list. So the restore reply and `status` agree by construction.
+run inside the restore's transaction after step 6, not from the revoke
+statement's list: a plain statement in the restore's transaction, inside
+`within` and before `finish` (`ops.rs:500-511`), after `restore_operator`
+returns. No barrier on this path. A failure of it rolls the restore back:
+`auth_unavailable` (or `server_error`, by the store-failure mapping of
+`mod.rs:436-441`), an `UncertainCommit` at the client, and `status` then
+shows `issued` (or `expiring` or `expired` once the time has passed). So the restore reply and `status` agree by construction.
 
 The predicate also lists a credential that another writer revoked at the
 identical microsecond, before the restore locked the credentials
 (over-inclusion only; `revoke_admin_credential`, `operator.rs:727-745`, has
-no online caller yet; inferred). Both sources include it alike. No column
+no online caller yet; inferred). Both sources include it alike. A later
+revocation at the same microsecond makes `status`'s count exceed the
+reply's; the client restarts the walk from `status` alone. No column
 records the revoking operation (lead ruling, Q4: no schema change).
 
 ### Atomicity and audit
@@ -446,8 +467,8 @@ fixture pins (F9).
    independent signed proof", and its third "Bootstrap, the recovery
    restoration, which verifies the signed response (ADR-013 item 7), and a
    `status` that changes no row and grants nothing; challenge bound to
-   instance, operation, arguments and revision" (inferred: :491 has the
-   same mismatch as :40).
+   instance, operation, arguments and revision" (F9; source column gains
+   "tasks §13 (2026-11-27 ruling)").
 
 API-152 (:515) is unchanged: `status` is not a break-glass kind. The wire
 bytes stay out of the contracts (`mod.rs:216`, `:227-228`); the fixture
@@ -501,7 +522,8 @@ shape in the `|null` notation and the new `restored` shape; golden requests
 `bootstrap` (instance, key, mTLS key enrolled) and after `restore`
 (`restored`, IDs, count 1); `unknown_replies`: a `status` reply missing a
 member, a string where `null` belongs, a `restored` reply whose list is
-longer than its count, unsorted, or shorter than `min(count, 1000)`; a
+longer than its count, unsorted, shorter than `min(count, 1000)`, or
+longer than 1000 when the count is larger; a
 `status` page with an ID not after `revoked_after`.
 
 **Service (`service/tests/local_transport.rs`, the PR's own):**
@@ -583,12 +605,16 @@ reconcile cases there would add test IDs to `scenarios.toml`, which
 
 - The serde default for a missing `Option` member, and the deserializer
   that refuses it: serde's documentation, not tried.
-- PostgreSQL behaviour, documented but not tested here: that `FOR SHARE`
-  waits for `FOR NO KEY UPDATE`; that a `COMMIT` received before the client
-  connection is discarded keeps the row lock until it ends; that
-  `ROLLBACK TO SAVEPOINT` releases a row lock taken after the savepoint;
-  that a row lock is refused in a `READ ONLY` transaction and on a standby.
-  The deadlock of F2 is the reviewer's reproduction, not the author's.
+- PostgreSQL behaviour still unverified: that a `COMMIT` received before
+  the client connection is discarded keeps the row lock until it ends, and
+  that a row lock is refused on a standby. Reproduced on PostgreSQL 16 by
+  the reviewer, not by the author: `FOR SHARE` waits for
+  `FOR NO KEY UPDATE` and `FOR KEY SHARE` does not; `ROLLBACK TO SAVEPOINT`
+  releases the lock and the barrier still waits; `READ ONLY` refuses
+  `FOR SHARE`; a new `FOR SHARE` overtakes a waiting `FOR NO KEY UPDATE`;
+  the barrier run inside the restore's own transaction keeps the parent's
+  lock, and a plain count there sees the restore's own writes without
+  waiting; the deadlock of F2 (`40P01`).
 - The size figures: computed from the fixture's golden line and from
   `serde_json`'s escape rules (as `operator/src/local/wire.rs:162-185`
   restates them), not by serializing 1000 IDs.
