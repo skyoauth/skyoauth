@@ -45,10 +45,21 @@ existing file is never overwritten). The seed file holds the 32-byte seed
 as 64 lowercase hex digits and at most one newline. On Unix it must be a
 regular file, not a symbolic link, owned by the effective user, of mode
 0600 exactly: run sign as the seed file's owner (not with sudo), and never
-install this binary setuid or setgid. On Windows its protection is NOT
-checked: keep it where only you can read it. The seed is never taken from
-the command line or the environment, never printed, and not wiped from
-memory.
+install this binary setuid or setgid. That check reads no access control
+list: on macOS an ACL can let others read the seed file or a new --out file
+(inherited from its directory) whatever the mode shows, so remove ACLs from
+the seed file and from the --out directory (ls -le, chmod -N).
+On Windows its protection is NOT checked: keep it where only you can read
+it. The seed is never taken from the command line or the environment,
+never printed, and not wiped from memory.
+
+A refused sign creates no file. A write to --out that fails (exit 3) may
+leave a partial or empty file: remove it. Under a file-size limit
+(ulimit -f) the process may instead be killed by SIGXFSZ, without exiting
+3; the file is then partial or empty too. When only the summary on standard
+output fails (exit 3), --out is complete: check it with verify-response
+before signing again, since a retry at the same path fails while the file
+exists.
 
 verify-response checks the response artifact's signature over the
 challenge with the recovery public key --key (64 lowercase hex digits).
@@ -273,7 +284,10 @@ impl Given {
                 Some((_, value)) if value.is_empty() => {
                     return Err(usage(format!("{flag} has an empty value")));
                 }
-                Some((_, value)) if value.to_str().is_some_and(|v| v.starts_with("--")) => {
+                // The argument's own bytes (the platform's encoding, of
+                // which ASCII is a subset), before any conversion to
+                // UTF-8: a value that is not UTF-8 is refused too.
+                Some((_, value)) if value.as_encoded_bytes().starts_with(b"--") => {
                     return Err(usage(format!("{flag} needs a value")));
                 }
                 Some((_, value)) => value.clone(),

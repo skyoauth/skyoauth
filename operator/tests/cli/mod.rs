@@ -1002,6 +1002,56 @@ fn non_utf8_arguments() {
     }
 }
 
+/// A value that begins with `--` is a usage error even when it is not
+/// UTF-8: the check reads the argument's own bytes before any conversion,
+/// so a path flag cannot take it as a file name either.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_value_that_begins_with_two_dashes_is_a_usage_error() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let dashes = OsString::from_vec(b"--\xff".to_vec());
+    let cases: [(&str, Vec<OsString>); 3] = [
+        (
+            "--instance-id",
+            vec![
+                "verify-challenge".into(),
+                "--challenge".into(),
+                "missing".into(),
+                "--instance-id".into(),
+                dashes.clone(),
+            ],
+        ),
+        (
+            "--challenge",
+            vec![
+                "verify-challenge".into(),
+                "--challenge".into(),
+                dashes.clone(),
+            ],
+        ),
+        (
+            "--seed-file",
+            vec![
+                "sign".into(),
+                "--challenge".into(),
+                "missing".into(),
+                "--seed-file".into(),
+                dashes,
+            ],
+        ),
+    ];
+    for (flag, arguments) in cases {
+        assert_eq!(
+            run(&arguments),
+            Run {
+                code: 2,
+                stdout: String::new(),
+                stderr: format!("skyoauth-operator: {flag} needs a value\n{HINT}"),
+            }
+        );
+    }
+}
+
 /// `--help`, `-h` or `help` alone, and `--help` or `-h` where a flag of a
 /// command is expected: the usage on standard output, exit 0, always the
 /// same text (`help` is a command only: see [`usage_errors_are_exit_2`]).

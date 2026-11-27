@@ -7,7 +7,16 @@
 //! bit). The bytes are written and synchronized to the disk (`sync_all`)
 //! before success is reported. A write or synchronization that fails after
 //! the file was created may leave a partial or empty file: such a file is
-//! not a response artifact and is refused as one.
+//! not a response artifact and is refused as one. Under a file-size limit
+//! (`RLIMIT_FSIZE`) a write over it raises `SIGXFSZ`, whose default action
+//! kills the process before the write returns: no exit code, and the file
+//! is partial or empty too. No signal is handled here (that would take an
+//! `unsafe` call or a dependency), so the exit code 3 for such a write
+//! holds only where the signal is ignored.
+//!
+//! No access control list is set or read: on macOS the new file inherits
+//! the ACL entries of its directory, which its mode does not show, so the
+//! help tells the operator to remove the ACLs of the `--out` directory.
 
 use std::{fs::OpenOptions, io::Write as _, path::Path};
 

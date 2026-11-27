@@ -708,7 +708,8 @@ fn seed_file_content() {
 /// named pipe or a device, refused without being opened), not a symbolic
 /// link (even to a good seed file), of mode 0600 exactly, owned by the
 /// effective user (tried only as root, which can give the file another
-/// owner; a NOTICE otherwise). Each is exit 3 with a fixed message, and
+/// owner; a NOTICE otherwise, and as the root of a user namespace that
+/// cannot give it UID 65534). Each is exit 3 with a fixed message, and
 /// nothing is written. Runs as root and as another user.
 #[cfg(unix)]
 #[test]
@@ -772,8 +773,21 @@ fn seed_file_protection_on_unix() {
 
     // Another owner: only root can make one.
     let owned = seed_file(&op.dir, "owned", seed.as_bytes());
-    if fs::metadata(&owned).unwrap().uid() == 0 {
-        std::os::unix::fs::lchown(&owned, Some(65_534), None).unwrap();
+    // EINVAL from the change of owner: the root of a user namespace that
+    // maps no UID 65534 (a container's root, not the system's). It is
+    // reported as not root, with the same notice, so that the root step,
+    // which runs as the system's root and fails on that notice, fails on
+    // it too; the line before it says why.
+    let other_owner = fs::metadata(&owned).unwrap().uid() == 0
+        && match std::os::unix::fs::lchown(&owned, Some(65_534), None) {
+            Ok(()) => true,
+            Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => {
+                eprintln!("lchown to UID 65534: {err}: this user namespace does not map it");
+                false
+            }
+            Err(err) => panic!("lchown to UID 65534: {err}"),
+        };
+    if other_owner {
         io(&owned, "the file is not owned by the effective user");
         // A link owned by root to that file is a link still.
         let to_owned = op.dir.0.join("to_owned");

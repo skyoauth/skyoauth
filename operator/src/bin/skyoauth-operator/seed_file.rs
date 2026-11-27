@@ -12,6 +12,13 @@
 //!   must be the same file (device and inode) as the path checked. On
 //!   other platforms (Windows) its protection is not checked: the operator
 //!   must protect it by other means.
+//! - No access control list is read (the standard library cannot), as in
+//!   the client's socket path check (`check_socket`, "Access control
+//!   lists"). Linux shows a POSIX ACL's grants in the group bits (its
+//!   mask), so a file an ACL lets others read is not of mode 0600; macOS
+//!   does not, so there an ACL can let others read a file of mode 0600:
+//!   the help tells the operator to remove the ACLs of the seed file and
+//!   of the `--out` directory.
 //! - A file of more than 128 bytes is refused as too large; at most 129
 //!   bytes are read, into a fixed buffer, so a file that grows while it is
 //!   read is refused all the same. Within the cap, the bytes must decode as

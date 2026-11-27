@@ -154,7 +154,7 @@ output that was closed when the command started is reopened on
 `/dev/null` by the Rust runtime on Unix, so a response written there would
 be lost with exit 0, and a shell redirection would bypass the checks of
 `--out` (a new file, mode 0600). So `sign` never prints a signature, and a
-failed `sign` prints nothing on standard output and creates no file. The
+`sign` that fails prints nothing on standard output. The
 artifact is built with the transport's codec
 (the `restore` request line without its `op` member), so it is byte for
 byte what a `restore` request carries. Ed25519 signing is deterministic: the
@@ -170,6 +170,30 @@ write or synchronization that fails after the file was created is exit 3
 (`--out: the file cannot be written (<kind>)`) and may leave a partial or
 empty file, which is not a response artifact and is refused as one; remove
 it before signing again. (Implementation pick.)
+
+What a `sign` that does not succeed leaves (implementation pick; the help
+says the same):
+
+- A refused `sign` (exit 1), and one stopped by a usage error (exit 2) or
+  by an I/O error before `--out` is created (exit 3: the challenge, the
+  clock, the seed file, an `--out` that exists or cannot be created),
+  creates no file.
+- A write or synchronization of `--out` that fails (exit 3) may leave a
+  partial or empty file: remove it.
+- Under a file-size limit (`RLIMIT_FSIZE`, `ulimit -f`) the process may
+  instead be killed by `SIGXFSZ`, whose default action ends it with no
+  exit code of its own; the file is then partial or empty too, and must be
+  removed. The binary handles no signal (no `unsafe` call, no dependency);
+  exit 3 for a write over the limit holds only where `SIGXFSZ` is ignored,
+  as the test that pins it arranges (`trap "" XFSZ`).
+- When only the summary on standard output cannot be written (exit 3,
+  `the output cannot be written (<kind>)`), the response was written and
+  synchronized first, so `--out` is complete: check it with
+  `verify-response` before signing again, since a retry at the same path
+  fails while the file exists (`--out: the file already exists`).
+- On macOS an access control list inherited from the `--out` directory can
+  let other users read the new file whatever its mode shows (see
+  [the seed file](#the-seed-file)): remove the directory's ACLs first.
 
 Results go to standard output, errors to standard error as one line
 `skyoauth-operator: <message>` (a usage error adds a line that points to
@@ -266,6 +290,16 @@ Lead rulings (D1b), implemented in `operator/src/bin/skyoauth-operator/seed_file
   which follows the effective UID). Run `sign` as the seed file's owner:
   under `sudo` the effective user is root, and a seed file of the operator
   is refused as another user's.
+- The owner and mode check reads no access control list (`std` cannot),
+  as the client's socket path check does not
+  (`skyoauth_operator::local::check_socket`, "Access control lists"). On
+  Linux a POSIX ACL's grants show in the group bits (the ACL's mask), so a
+  seed file an ACL lets others read is not of mode 0600 and is refused.
+  macOS does not show them: an ACL there can let other users read the
+  seed file whatever its mode bits show, and an ACL inherited from the
+  `--out` directory can do the same for the new response file. On macOS
+  remove the ACLs of the seed file and of the `--out` directory
+  (`ls -le` shows them, `chmod -N` removes them).
 - Never install the binary setuid or setgid. It checks the seed file
   against its effective user, so a setuid copy is a confused deputy: a
   setuid-root copy run by any user signs with a root-owned seed file
@@ -289,6 +323,9 @@ Lead rulings (D1b), implemented in `operator/src/bin/skyoauth-operator/seed_file
   path checked (only that both are regular files and the path is not a
   symbolic link). The operator must protect the file by other means; the
   help says so. The binary claims no protection there.
+- **macOS access control lists:** the owner and mode check does not see
+  them (see [the seed file](#the-seed-file)); remove the ACLs of the seed
+  file and of the `--out` directory.
 - **The seed in memory:** not wiped (see [the seed file](#the-seed-file)),
   so it can reach a core dump or swap while the process runs and after:
   disable core dumps (`ulimit -c 0`) and use encrypted or no swap on the
