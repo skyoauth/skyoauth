@@ -185,12 +185,18 @@ impl<C: Connector> LocalClient<C> {
     /// listed too): the walk restarts from `status` alone, once. Anything
     /// else is an unknown outcome. The list then holds what the service
     /// selects at that time, the restore's credentials and maybe the
-    /// tie's.
+    /// tie's. A credential's `revoked_at` is set once and no credential is
+    /// deleted, so a count never falls: the list returned holds at least
+    /// the largest count seen in the walk (the restore reply's included),
+    /// and every ID of the restore reply's list; a restarted walk that
+    /// does not is an unknown outcome.
     ///
     /// # Errors
     ///
     /// - [`UnknownOutcome::PageMismatch`] when the pages do not hold
-    ///   together as above, or a second tie follows the restart;
+    ///   together as above, a second tie follows the restart, or the list
+    ///   holds fewer IDs than the largest count seen or misses an ID of the
+    ///   restore reply's list;
     /// - the error of a `status` call, as it is: `status` changes no row
     ///   and is [`Retry::Safe`](super::Retry::Safe), so the walk may be
     ///   run again. The restore's own outcome is the restore reply's, which
@@ -200,53 +206,70 @@ impl<C: Connector> LocalClient<C> {
         operation_id: &str,
         restored: Option<&Restored>,
     ) -> Result<Vec<String>, CallError> {
+        // The largest count seen so far: the list must hold at least as
+        // many IDs.
+        let mut largest = 0;
         let walk = match restored {
             Some(restored) => {
                 let held = first_page(
                     restored.revoked_credential_count,
                     &restored.revoked_credential_ids,
                 )?;
+                largest = restored.revoked_credential_count;
                 self.pages(
                     operation_id,
                     restored.revoked_credential_count,
                     held.to_vec(),
                     true,
+                    &mut largest,
                 )?
             }
-            None => self.walk_from_status(operation_id)?,
+            None => self.walk_from_status(operation_id, &mut largest)?,
         };
         // The one restart.
         let walk = match walk {
-            Walk::Done(ids) => return Ok(ids),
-            Walk::Tie => self.walk_from_status(operation_id)?,
+            Walk::Done(ids) => Walk::Done(ids),
+            Walk::Tie => self.walk_from_status(operation_id, &mut largest)?,
         };
-        match walk {
-            Walk::Done(ids) => Ok(ids),
-            Walk::Tie => Err(mismatch()),
+        let Walk::Done(ids) = walk else {
+            return Err(mismatch());
+        };
+        let first = restored.map_or(&[][..], |restored| &restored.revoked_credential_ids);
+        if usize::try_from(largest).is_ok_and(|largest| ids.len() >= largest)
+            && first.iter().all(|id| ids.binary_search(id).is_ok())
+        {
+            Ok(ids)
+        } else {
+            Err(mismatch())
         }
     }
 
     /// A walk from `status` alone: its first page, then the rest.
-    fn walk_from_status(&self, operation_id: &str) -> Result<Walk, CallError> {
+    /// `largest` is raised to every count read.
+    fn walk_from_status(&self, operation_id: &str, largest: &mut i64) -> Result<Walk, CallError> {
         let (count, page) = restored_page(self.status(&StatusRequest {
             operation_id: Some(operation_id.to_owned()),
             credential_spki: None,
             revoked_after: None,
         })?)?;
+        *largest = (*largest).max(count);
         first_page(count, &page)?;
-        self.pages(operation_id, count, page, false)
+        self.pages(operation_id, count, page, false, largest)
     }
 
     /// The pages after `held`, the first page, until `count` IDs are held.
     /// `count` is the restore reply's when `after_restore`: a first
     /// `status` count above it is a tie, one below it a mismatch. Between
-    /// `status` pages, any change of the count is a tie.
+    /// `status` pages, any change of the count is a tie. A page with an ID
+    /// not after the `revoked_after` sent is a mismatch, whatever its
+    /// count. `largest` is raised to every count read.
     fn pages(
         &self,
         operation_id: &str,
         count: i64,
         mut held: Vec<String>,
         mut after_restore: bool,
+        largest: &mut i64,
     ) -> Result<Walk, CallError> {
         let total = usize::try_from(count).map_err(|_| mismatch())?;
         while held.len() < total {
@@ -257,6 +280,10 @@ impl<C: Connector> LocalClient<C> {
                 credential_spki: None,
                 revoked_after: Some(after.clone()),
             })?)?;
+            *largest = (*largest).max(page_count);
+            if page.iter().any(|id| *id <= after) {
+                return Err(mismatch());
+            }
             if page_count != count {
                 return if !after_restore || page_count > count {
                     Ok(Walk::Tie)
@@ -265,9 +292,7 @@ impl<C: Connector> LocalClient<C> {
                 };
             }
             after_restore = false;
-            if page.len() != MAX_REVOKED_IDS_PER_REPLY.min(total - held.len())
-                || page.iter().any(|id| *id <= after)
-            {
+            if page.len() != MAX_REVOKED_IDS_PER_REPLY.min(total - held.len()) {
                 return Err(mismatch());
             }
             held.extend(page);

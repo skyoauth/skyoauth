@@ -2018,17 +2018,31 @@ fn a_status_page_of_another_length_is_unknown() {
 }
 
 /// A `status` page whose IDs are not all after the `revoked_after` sent is
-/// unknown: one that starts with it, one wholly before it.
+/// unknown: one that starts with it, one wholly before it; also with a
+/// changed count, which is then no tie (checked first, no restart).
 #[test]
 fn an_id_not_after_revoked_after_is_unknown() {
-    for ids in [revoked(999..1001), revoked(500..502)] {
-        let reply = status_line("restored", Some((1002, &ids)));
-        assert_eq!(
-            walked(Some(&restored(1002, 0..1000)), vec![(after(1000), reply)]),
-            PAGE_MISMATCH,
-            "{ids:?}"
-        );
+    for count in [1002, 1003, 1001] {
+        for ids in [revoked(999..1001), revoked(500..502)] {
+            let reply = status_line("restored", Some((count, &ids)));
+            assert_eq!(
+                walked(Some(&restored(1002, 0..1000)), vec![(after(1000), reply)]),
+                PAGE_MISMATCH,
+                "{count} {ids:?}"
+            );
+        }
     }
+    let reply = status_line("restored", Some((1501, &revoked(999..1001))));
+    assert_eq!(
+        walked(
+            None,
+            vec![
+                (page_request(None), page(1500, 0..1000)),
+                (after(1000), reply),
+            ]
+        ),
+        PAGE_MISMATCH
+    );
 }
 
 /// A `status` count above the restore reply's is the documented tie: the
@@ -2058,8 +2072,9 @@ fn a_status_count_above_the_restore_replys_restarts_from_status_alone() {
 
 /// A count that changes between `status` pages is the documented tie: the
 /// walk restarts from `status` alone, once (up or down, after a restore
-/// reply or from `status` alone); a second change, or a second count above
-/// the restore reply's, is unknown.
+/// reply or from `status` alone), and its list must hold at least the
+/// largest count seen; a second change, or a second count above the
+/// restore reply's, is unknown.
 #[test]
 fn a_count_that_changes_between_status_pages_restarts_once_then_is_unknown() {
     // Restarted, then complete.
@@ -2076,6 +2091,22 @@ fn a_count_that_changes_between_status_pages_restarts_once_then_is_unknown() {
         ),
         Ok(revoked(0..2501))
     );
+    // Down, restarted, and back to the largest count seen: complete.
+    assert_eq!(
+        walked(
+            None,
+            vec![
+                (page_request(None), page(1500, 0..1000)),
+                (after(1000), page(1499, 1000..1499)),
+                (page_request(None), page(1500, 0..1000)),
+                (after(1000), page(1500, 1000..1500)),
+            ]
+        ),
+        Ok(revoked(0..1500))
+    );
+    // Down, restarted, and the restarted walk below the largest count seen
+    // (the restore reply's, or a `status` page's): a count never falls, so
+    // unknown.
     assert_eq!(
         walked(
             Some(&restored(2500, 0..1000)),
@@ -2087,7 +2118,7 @@ fn a_count_that_changes_between_status_pages_restarts_once_then_is_unknown() {
                 (after(2000), page(2499, 2000..2499)),
             ]
         ),
-        Ok(revoked(0..2499))
+        PAGE_MISMATCH
     );
     assert_eq!(
         walked(
@@ -2099,7 +2130,7 @@ fn a_count_that_changes_between_status_pages_restarts_once_then_is_unknown() {
                 (after(1000), page(1499, 1000..1499)),
             ]
         ),
-        Ok(revoked(0..1499))
+        PAGE_MISMATCH
     );
     // Restarted, then a second change: unknown, with no second restart.
     assert_eq!(
@@ -2133,6 +2164,65 @@ fn a_count_that_changes_between_status_pages_restarts_once_then_is_unknown() {
                 (after(1000), page(1501, 1000..1501)),
                 (page_request(None), page(1501, 0..1000)),
                 (after(1000), page(1500, 1000..1500)),
+            ]
+        ),
+        PAGE_MISMATCH
+    );
+}
+
+/// A restarted walk must hold at least the largest count seen in the
+/// walk (the restore reply's included) and every ID of the restore
+/// reply's list: a restart that reports fewer, or a list without the
+/// restore reply's IDs, is unknown, not a shorter success.
+#[test]
+fn a_restarted_walk_below_the_largest_count_or_without_the_restore_ids_is_unknown() {
+    // Restore 1001, a tie at 1002, then a restart that reports 5.
+    assert_eq!(
+        walked(
+            Some(&restored(1001, 0..1000)),
+            vec![
+                (after(1000), page(1002, 1000..1002)),
+                (page_request(None), page(5, 0..5)),
+            ]
+        ),
+        PAGE_MISMATCH
+    );
+    // Restore 1001, a tie at 1002, then a restart whose list holds none of
+    // the restore reply's IDs.
+    let last = revoked(10_000..11_000).pop().unwrap();
+    assert_eq!(
+        walked(
+            Some(&restored(1001, 0..1000)),
+            vec![
+                (after(1000), page(1002, 1000..1002)),
+                (page_request(None), page(1002, 10_000..11_000)),
+                (page_request(Some(&last)), page(1002, 11_000..11_002)),
+            ]
+        ),
+        PAGE_MISMATCH
+    );
+    // Restore 1001, a tie at 1002, then a restart that holds every ID of
+    // the restore reply but only 1001, below the 1002 seen.
+    assert_eq!(
+        walked(
+            Some(&restored(1001, 0..1000)),
+            vec![
+                (after(1000), page(1002, 1000..1002)),
+                (page_request(None), page(1001, 0..1000)),
+                (after(1000), page(1001, 1000..1001)),
+            ]
+        ),
+        PAGE_MISMATCH
+    );
+    // From `status` alone: 1500, then 1499 (a tie), then a restart that
+    // reports 3.
+    assert_eq!(
+        walked(
+            None,
+            vec![
+                (page_request(None), page(1500, 0..1000)),
+                (after(1000), page(1499, 1000..1499)),
+                (page_request(None), page(3, 0..3)),
             ]
         ),
         PAGE_MISMATCH

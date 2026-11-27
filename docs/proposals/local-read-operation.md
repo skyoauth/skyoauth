@@ -6,7 +6,7 @@ Status: Reviewed; rulings applied (the lead, 2026-11-27): the design holds
 (a) to (h) are applied, and Q1 to Q8 are ruled (see "Rulings"). F4 widens what a local peer reads: lead scoping, user
 informed. Implementation: slice 2 (the service `status`, the restore
 reply bound, the fixture, the operator codec and the five contract
-amendments) is implemented; slice 3 (C4: `LocalClient::status`, the page iterator and the reconcile verdicts) is implemented except its round trip against the real server, which needs a dependency edge the lead has not yet approved. It answers two rulings
+amendments) is implemented; slice 3 (C4: `LocalClient::status`, the page iterator and the reconcile verdicts) is implemented except its round trip against the real server, which needs a dev-dependency of `skyoauth-scenarios` on `skyoauth-operator`: approved by the lead as a separate follow-up. It answers two rulings
 of the user (2026-11-27, relayed by the lead), recorded in tasks §13 under "Other rulings of the
 user, 2026-11-27": "Read-only socket operation" (an operation that only
 reads is added to the local socket; proposal first, then the
@@ -577,7 +577,10 @@ pins them.
   sent; the count is the same on every page of one walk. A `status` count
   above the restore reply's, or one that changes between pages, is the
   documented tie: restart the walk from `status` alone, once; anything
-  else is an unknown outcome.
+  else is an unknown outcome. A count never falls (`revoked_at` is set
+  once, no credential is deleted), so a walk whose list ends below the
+  largest count seen (the restore reply's included), or without every ID
+  of the restore reply's list, is `PageMismatch`, an unknown outcome.
 - **C4** (the operator slice that uses the socket end to end; its scope is
   not recorded in the repository, `docs/proposals/demo-walkthroughs.md:360`;
   not verified): `LocalClient::status`, the page iterator, and the

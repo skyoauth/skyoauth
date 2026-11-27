@@ -148,7 +148,11 @@
 //! of the IDs it revoked, the first in byte order, with their count; the
 //! list is complete exactly when its length equals the count, and
 //! [`LocalClient::revoked_credential_ids`] reads the rest with `status`,
-//! checking the pages against the count and each other.
+//! checking the pages against the count and each other; its list holds at
+//! least the largest count seen in the walk and every ID of the restore
+//! reply's list. The walk has no overall bound beyond each call's own time
+//! limits: a hostile server on the already trusted socket could keep it
+//! going.
 //!
 //! # Key material
 //!
