@@ -37,7 +37,7 @@ Every endpoint belongs to exactly one listener class.
 | Private trust   | Authenticated checker or gateway trust consumer (see OQ-API-12)                       | Authenticated private channel rooted in deployment trust         | design §6.2             |
 | Private control | Registered route-controller, credential-provisioner or protection-controller identity | mTLS identity with explicit scope                                | design §4.2             |
 | Operator        | Independent operator (`adm_*`)                                                        | Registered mTLS credential plus active local role, on every call | design §7.2             |
-| Local           | Deployment operator on the service host                                               | Local command or Unix socket plus independent signed proof       | design §7.2             |
+| Local           | Deployment operator on the service host                                               | Local command or Unix socket (peer UID check); the recovery restoration also needs the independent signed proof | design §7.2             |
 
 The split of private endpoints into the five classes private gateway, private
 policy, private trust, private control and operator is this contract's
@@ -488,7 +488,7 @@ whole first path).
 
 | Interface                                   | Caller                                            | Required behavior                                                                               | Source                       |
 | ------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------- |
-| Local command or Unix socket on the service | Deployment operator plus independent signed proof | Bootstrap, and the recovery restoration, which verifies the signed response (ADR-013 item 7); challenge bound to instance, operation, arguments and revision | design §7.2; tasks §2 matrix |
+| Local command or Unix socket on the service | Deployment operator (peer UID check); the recovery restoration also needs the independent signed proof | Bootstrap, the recovery restoration, which verifies the signed response (ADR-013 item 7), and a `status` that changes no row and grants nothing; challenge bound to instance, operation, arguments and revision | design §7.2; tasks §2 matrix; tasks §13 (2026-11-27 ruling) |
 | `skyoauth-operator` workstation command     | Independent operator or recovery key holder       | Private mTLS client and offline recovery signer; private keys never copied into a pod           | design §7.2; tasks §2 matrix |
 
 ### 7.2 Approval boundaries

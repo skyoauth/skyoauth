@@ -65,8 +65,8 @@ use skyoauth_operator::{
     local::{
         BootstrapRequest, CallError, Connector, DEFAULT_IDLE_WAIT, DEFAULT_TOTAL_WAIT, ErrorCode,
         HalfClose, IssueChallengeRequest, Issued, LocalClient, MAX_REPLY_BYTES, MAX_REQUEST_BYTES,
-        NotSent, Op, Reply, Request, ResponseRequest, Retry, SocketPath, Timeouts, UnknownOutcome,
-        parse_reply,
+        NotSent, Op, Reply, Request, ResponseRequest, Retry, SocketPath, StatusRequest, Timeouts,
+        UnknownOutcome, parse_reply,
     },
     recovery::RecoveryPublicKey,
 };
@@ -143,6 +143,17 @@ fn counted(path: &Path, timeouts: Timeouts) -> (LocalClient<Counted>, Arc<Atomic
     (client, connects)
 }
 
+/// The operations the client has a typed call for: every one but
+/// `status`, whose typed call (`LocalClient::status`) comes with the
+/// operator slice C4 (lead's scope for the service PR). The loops over the
+/// operations run over these; `status`'s classification of a refusal is
+/// checked by the exchange's unit test
+/// (`only_the_three_writes_make_a_store_failure_uncertain`) and its codec
+/// by `local_wire`.
+fn typed_ops() -> impl Iterator<Item = Op> {
+    Op::ALL.into_iter().filter(|op| *op != Op::Status)
+}
+
 /// Calls the operation of `request` through its typed method, as a
 /// [`Reply`] (an issue's challenge back as its reply's members).
 fn call<C: Connector>(client: &LocalClient<C>, request: &Request) -> Result<Reply, CallError> {
@@ -158,6 +169,7 @@ fn call<C: Connector>(client: &LocalClient<C>, request: &Request) -> Result<Repl
         }),
         Request::Preview(response) => client.preview(response).map(Reply::Previewed),
         Request::Restore(response) => client.restore(response).map(Reply::Restored),
+        Request::Status(_) => unreachable!("no typed call for status before C4: see typed_ops"),
     }
 }
 
@@ -186,6 +198,11 @@ fn request(op: Op) -> Request {
         }),
         Op::Preview => Request::Preview(response),
         Op::Restore => Request::Restore(response),
+        Op::Status => Request::Status(StatusRequest {
+            operation_id: Some("SENTINEL-OPERATION".into()),
+            credential_spki: Some(vec![0xc7; 44]),
+            revoked_after: Some("SENTINEL-AFTER".into()),
+        }),
     }
 }
 
@@ -206,6 +223,7 @@ fn golden_success(op: Op) -> Vec<u8> {
         Op::IssueChallenge => "issued",
         Op::Preview => "previewed",
         Op::Restore => "restored",
+        Op::Status => "status_restored",
     })
 }
 
@@ -321,7 +339,7 @@ fn against(
 /// issue the challenge `M` whose members are the reply's.
 #[test]
 fn each_golden_success_is_its_operations_success() {
-    for op in Op::ALL {
+    for op in typed_ops() {
         let reply = golden_success(op);
         let expected = parse_reply(op, &reply).unwrap();
         let (outcome, _) = against(&request(op), PATIENT, move |mut accepted| {
@@ -369,7 +387,7 @@ fn store_failures_are_uncertain_commits_after_a_write() {
         ErrorCode::Conflict,
         ErrorCode::NotRestorable,
     ] {
-        for op in Op::ALL {
+        for op in typed_ops() {
             assert_eq!(
                 refused(op, code),
                 Err(CallError::Refused(code)),
@@ -793,7 +811,7 @@ fn a_connection_that_cannot_be_made_is_not_sent() {
         (long, io::ErrorKind::InvalidInput),
     ];
     for (path, kind) in cases {
-        for op in Op::ALL {
+        for op in typed_ops() {
             let (client, connects) = counted(&path, PATIENT);
             let outcome = call(&client, &request(op));
             let Err(CallError::NotSent(NotSent::Connect(got))) = outcome else {
@@ -902,7 +920,7 @@ impl Connector for Stalled {
 #[test]
 fn a_write_that_times_out_is_unknown() {
     let client = LocalClient::with_connector(Stalled, PATIENT);
-    for op in Op::ALL {
+    for op in typed_ops() {
         let start = Instant::now();
         assert_eq!(
             call(&client, &request(op)),
@@ -1297,7 +1315,7 @@ fn a_half_close_that_fails_after_the_whole_line_still_reads_the_reply() {
                 Err(CallError::Unknown(UnknownOutcome::ConnectionLost(kind))),
             ),
         ];
-        for op in Op::ALL {
+        for op in typed_ops() {
             cases.push((
                 op,
                 golden_success(op),
@@ -1333,7 +1351,7 @@ fn a_wait_the_stream_refuses_ends_the_call() {
         io::ErrorKind::Unsupported,
         io::ErrorKind::Other,
     ] {
-        for op in Op::ALL {
+        for op in typed_ops() {
             let case = format!("{kind:?}, {op:?}");
             let plan = Plan {
                 write_waits: Some((0, kind)),
@@ -1655,6 +1673,7 @@ fn default_timeouts_are_the_servers_defaults() {
             (Op::IssueChallenge, Retry::ReconcileFirst),
             (Op::Preview, Retry::Safe),
             (Op::Restore, Retry::ReconcileFirst),
+            (Op::Status, Retry::Safe),
         ]
     );
 }
@@ -1694,7 +1713,7 @@ fn debug_and_display_show_no_value() {
         ),
         format!("{:?}", Retry::ReconcileFirst),
     ];
-    for op in Op::ALL {
+    for op in typed_ops() {
         let outcome = call(&client, &request(op));
         assert!(
             matches!(outcome, Err(CallError::NotSent(NotSent::Connect(_)))),

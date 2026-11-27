@@ -1,7 +1,7 @@
 //! The wire format: one request line in, one response line out (see the
 //! module docs of [`crate::local_transport`], "Protocol").
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// A request, by its `op` member. Each variant's members are closed
 /// (`deny_unknown_fields`); serde refuses a missing, repeated or unknown
@@ -15,6 +15,7 @@ pub(super) enum Request {
     IssueChallenge(IssueWire),
     Preview(ResponseWire),
     Restore(ResponseWire),
+    Status(StatusWire),
 }
 
 impl Request {
@@ -42,6 +43,7 @@ impl Request {
             Self::IssueChallenge(_) => "issue_challenge",
             Self::Preview(_) => "preview",
             Self::Restore(_) => "restore",
+            Self::Status(_) => "status",
         }
     }
 }
@@ -87,6 +89,30 @@ pub(super) struct ResponseWire {
     pub(super) signature: String,
 }
 
+/// `status`: what to report. Every member is required, `null` when not
+/// asked: a missing member is refused like any other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StatusWire {
+    /// The recovery challenge to report.
+    #[serde(deserialize_with = "nullable")]
+    pub(super) operation_id: Option<String>,
+    /// As [`BootstrapWire::credential_spki`]: the mTLS key to report.
+    #[serde(deserialize_with = "nullable")]
+    pub(super) credential_spki: Option<String>,
+    /// The last revoked credential ID the client holds; only with an
+    /// `operation_id`.
+    #[serde(deserialize_with = "nullable")]
+    pub(super) revoked_after: Option<String>,
+}
+
+/// A member that may be `null` but must be present: with
+/// `deserialize_with`, serde refuses a missing member instead of taking
+/// `None`.
+fn nullable<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Option::deserialize(deserializer)
+}
+
 /// A response line. Every success has its own members; every refusal is
 /// `{"error":"<code>"}` and nothing else.
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -118,10 +144,15 @@ pub(super) enum Reply {
         admin_id: String,
         credential_id: String,
         binding_id: String,
+        /// How many credentials the restore revoked.
+        revoked_credential_count: i64,
+        /// The first of them, at most `MAX_REVOKED_IDS_PER_REPLY`, in byte
+        /// order.
         revoked_credential_ids: Vec<String>,
         recovery_key_epoch: i64,
         recovery_state_revision: i64,
     },
+    Status(Box<StatusReply>),
     Error {
         error: &'static str,
     },
@@ -136,6 +167,34 @@ impl Reply {
         line.push(b'\n');
         line
     }
+}
+
+/// The `status` reply: every member, in this order, `null` where it has
+/// nothing to say (see the module docs of [`crate::local_transport`],
+/// "Operations").
+#[derive(Debug, Serialize, PartialEq, Eq, Default)]
+pub(super) struct StatusReply {
+    /// Whole microseconds since the Unix epoch, as every time here.
+    pub(super) server_time: i64,
+    pub(super) instance_id: Option<String>,
+    pub(super) recovery_key_epoch: Option<i64>,
+    pub(super) recovery_state_revision: Option<i64>,
+    /// Lowercase hexadecimal.
+    pub(super) recovery_public_key: Option<String>,
+    pub(super) operation_state: Option<&'static str>,
+    pub(super) expires_at: Option<i64>,
+    pub(super) settles_at: Option<i64>,
+    pub(super) restored_at: Option<i64>,
+    pub(super) admin_id: Option<String>,
+    pub(super) credential_id: Option<String>,
+    pub(super) binding_id: Option<String>,
+    pub(super) revoked_credential_count: Option<i64>,
+    pub(super) revoked_credential_ids: Option<Vec<String>>,
+    pub(super) enrolled_state: Option<&'static str>,
+    pub(super) enrolled_admin_id: Option<String>,
+    pub(super) enrolled_credential_id: Option<String>,
+    /// Lowercase hexadecimal.
+    pub(super) enrolled_trust_anchor_sha256: Option<String>,
 }
 
 /// `bytes` in lowercase hexadecimal.
@@ -232,6 +291,14 @@ mod tests {
                 r#"{"op":"restore","operation_id":"o","signature":"00"}"#,
                 "restore",
             ),
+            (
+                r#"{"op":"status","operation_id":null,"credential_spki":null,"revoked_after":null}"#,
+                "status",
+            ),
+            (
+                r#"{"revoked_after":"c","credential_spki":"00","operation_id":"o","op":"status"}"#,
+                "status",
+            ),
         ] {
             assert_eq!(parse(text).unwrap().op(), op, "{text}");
         }
@@ -259,6 +326,17 @@ mod tests {
             r#"{"op":"restore","operation_id":1,"signature":"00"}"#,
             r#"{"op":"restore","operation_id":"o","signature":null}"#,
             r#"{"op":"restore","operation_id":"o","signature":["00"]}"#,
+            // A status member missing, mistyped, unknown or repeated: null
+            // is a value, absence is not.
+            r#"{"op":"status","credential_spki":null,"revoked_after":null}"#,
+            r#"{"op":"status","operation_id":null,"revoked_after":null}"#,
+            r#"{"op":"status","operation_id":null,"credential_spki":null}"#,
+            r#"{"op":"status"}"#,
+            r#"{"op":"status","operation_id":1,"credential_spki":null,"revoked_after":null}"#,
+            r#"{"op":"status","operation_id":null,"credential_spki":[],"revoked_after":null}"#,
+            r#"{"op":"status","operation_id":null,"credential_spki":null,"revoked_after":false}"#,
+            r#"{"op":"status","operation_id":null,"credential_spki":null,"revoked_after":null,"signature":null}"#,
+            r#"{"op":"status","operation_id":null,"operation_id":null,"credential_spki":null,"revoked_after":null}"#,
             // Not one object.
             r#"[{"op":"restore","operation_id":"o","signature":"00"}]"#,
             r#"{"op":"restore","operation_id":"o","signature":"00"}{}"#,
@@ -268,6 +346,97 @@ mod tests {
         ] {
             assert!(parse(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_status_member_is_null_or_a_string() {
+        let Ok(Request::Status(empty)) = parse(
+            r#"{"op":"status","operation_id":null,"credential_spki":null,"revoked_after":null}"#,
+        ) else {
+            panic!("not a status request");
+        };
+        assert_eq!(
+            (
+                empty.operation_id,
+                empty.credential_spki,
+                empty.revoked_after
+            ),
+            (None, None, None)
+        );
+        let Ok(Request::Status(full)) = parse(
+            r#"{"op":"status","operation_id":"o","credential_spki":"00","revoked_after":""}"#,
+        ) else {
+            panic!("not a status request");
+        };
+        assert_eq!(
+            (full.operation_id, full.credential_spki, full.revoked_after),
+            (Some("o".into()), Some("00".into()), Some(String::new()))
+        );
+    }
+
+    #[test]
+    fn a_status_reply_has_every_member_in_order() {
+        let nothing = Reply::Status(Box::new(StatusReply {
+            server_time: 1,
+            ..StatusReply::default()
+        }));
+        assert_eq!(
+            String::from_utf8(nothing.line()).unwrap(),
+            "{\"server_time\":1,\"instance_id\":null,\"recovery_key_epoch\":null,\
+             \"recovery_state_revision\":null,\"recovery_public_key\":null,\
+             \"operation_state\":null,\"expires_at\":null,\"settles_at\":null,\
+             \"restored_at\":null,\"admin_id\":null,\"credential_id\":null,\
+             \"binding_id\":null,\"revoked_credential_count\":null,\
+             \"revoked_credential_ids\":null,\"enrolled_state\":null,\
+             \"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\
+             \"enrolled_trust_anchor_sha256\":null}\n"
+        );
+    }
+
+    /// The worst `restore` reply: a full page of the longest IDs the
+    /// database allows (255 characters), each a control character that
+    /// serializes as a six-byte escape, with the other members at their
+    /// longest, stays far under the operator client's 4 MiB.
+    #[test]
+    fn a_full_page_of_the_worst_ids_is_under_the_clients_reply_limit() {
+        let worst = "\u{1}".repeat(255);
+        let ids = vec![worst.clone(); crate::local_transport::MAX_REVOKED_IDS_PER_REPLY];
+        let restored = Reply::Restored {
+            admin_id: worst.clone(),
+            credential_id: worst.clone(),
+            binding_id: worst.clone(),
+            revoked_credential_count: i64::MAX,
+            revoked_credential_ids: ids.clone(),
+            recovery_key_epoch: i64::MAX,
+            recovery_state_revision: i64::MAX,
+        };
+        let line = restored.line();
+        assert!(line.len() > 1000 * 6 * 255, "{}", line.len());
+        assert!(line.len() < 4 << 20, "{}", line.len());
+        let status = Reply::Status(Box::new(StatusReply {
+            server_time: i64::MIN,
+            instance_id: Some(worst.clone()),
+            recovery_key_epoch: Some(i64::MIN),
+            recovery_state_revision: Some(i64::MIN),
+            // The database allows a recovery key of 8192 bytes.
+            recovery_public_key: Some("ff".repeat(8192)),
+            operation_state: Some("not_found"),
+            expires_at: Some(i64::MIN),
+            settles_at: Some(i64::MIN),
+            restored_at: Some(i64::MIN),
+            admin_id: Some(worst.clone()),
+            credential_id: Some(worst.clone()),
+            binding_id: Some(worst.clone()),
+            revoked_credential_count: Some(i64::MIN),
+            revoked_credential_ids: Some(ids),
+            enrolled_state: Some("disabled"),
+            enrolled_admin_id: Some(worst.clone()),
+            enrolled_credential_id: Some(worst),
+            enrolled_trust_anchor_sha256: Some("ff".repeat(32)),
+        }));
+        let line = status.line();
+        assert!(line.len() < 1_600_000, "{}", line.len());
+        assert!(line.len() < 4 << 20, "{}", line.len());
     }
 
     #[test]

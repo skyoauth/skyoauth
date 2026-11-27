@@ -74,9 +74,10 @@ use std::{
 use common::TestDb;
 use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use skyoauth_service::{
     identity::canonical_public_identity,
-    ids::{IdGenerator, IdKind, test_support::SequentialIds},
+    ids::{IdError, IdGenerator, IdKind, test_support::SequentialIds},
     local_transport::{
         BindError, LocalListener, LocalTransport, MAX_REQUEST_BYTES, MAX_SOCKET_PATH_BYTES,
         SHUTDOWN_GRACE, Settings,
@@ -85,8 +86,9 @@ use skyoauth_service::{
     persistence::{
         self, PgPool,
         registry::{
-            AdminRole, ChainVerdict, OperatorRequest, OperatorScope, authorize_operator,
-            get_recovery_state, verify_audit_chain,
+            self, AdminRole, AuditActor, ChainVerdict, NewAuditEvent, NewTenant, OperatorRequest,
+            OperatorScope, StatusError, authorize_operator, get_recovery_state,
+            revoked_by_restoration, verify_audit_chain,
         },
     },
 };
@@ -3057,6 +3059,7 @@ async fn a_challenge_is_issued_answered_and_consumed_once() {
             "admin_id": replacement[0],
             "credential_id": replacement[1],
             "binding_id": replacement[2],
+            "revoked_credential_count": 1,
             "revoked_credential_ids": [ids(1, IdKind::AdminCredential, 1)[0]],
             "recovery_key_epoch": 2,
             "recovery_state_revision": 2,
@@ -4345,4 +4348,1499 @@ async fn the_deadline_does_not_cut_a_transaction() {
     };
     server.stop().await;
     db.drop([pool]).await;
+}
+
+// ---------------------------------------------------------------------------
+// The status operation (docs/proposals/local-read-operation.md)
+
+/// The members of a `status` reply, in their order.
+const STATUS_MEMBERS: [&str; 18] = [
+    "server_time",
+    "instance_id",
+    "recovery_key_epoch",
+    "recovery_state_revision",
+    "recovery_public_key",
+    "operation_state",
+    "expires_at",
+    "settles_at",
+    "restored_at",
+    "admin_id",
+    "credential_id",
+    "binding_id",
+    "revoked_credential_count",
+    "revoked_credential_ids",
+    "enrolled_state",
+    "enrolled_admin_id",
+    "enrolled_credential_id",
+    "enrolled_trust_anchor_sha256",
+];
+
+/// The transport's page of revoked credential IDs.
+const PAGE: usize = 1000;
+
+/// The default transaction timeout: `settles_at` is `expires_at` plus it.
+const SETTLE: Duration = Duration::from_secs(60);
+
+/// The challenge TTL of [`settings`].
+const TTL: Duration = Duration::from_secs(300);
+
+fn status_request(
+    operation_id: Option<&str>,
+    credential: Option<u8>,
+    revoked_after: Option<&str>,
+) -> Value {
+    json!({
+        "op": "status",
+        "operation_id": operation_id,
+        "credential_spki": credential.map(spki),
+        "revoked_after": revoked_after,
+    })
+}
+
+fn micros_of(time: SystemTime) -> i64 {
+    i64::try_from(time.duration_since(UNIX_EPOCH).unwrap().as_micros()).unwrap()
+}
+
+fn sha256_hex(text: &str) -> String {
+    hex(&Sha256::digest(text.as_bytes()))
+}
+
+/// The `status` reply at `now` with `members` set and every other member
+/// `null`.
+fn status_reply(now: SystemTime, members: &[(&str, Value)]) -> Value {
+    let mut reply = serde_json::Map::new();
+    for name in STATUS_MEMBERS {
+        reply.insert(name.into(), Value::Null);
+    }
+    reply.insert("server_time".into(), json!(micros_of(now)));
+    for (name, value) in members {
+        assert!(reply.contains_key(*name), "{name}");
+        reply.insert((*name).into(), value.clone());
+    }
+    Value::Object(reply)
+}
+
+/// The members of the recovery state at `epoch` (and the same revision)
+/// with the key of `seed`, followed by `extra`.
+fn state_and(
+    epoch: i64,
+    seed: &[u8; 32],
+    extra: &[(&'static str, Value)],
+) -> Vec<(&'static str, Value)> {
+    let mut members = vec![
+        ("instance_id", json!(INSTANCE)),
+        ("recovery_key_epoch", json!(epoch)),
+        ("recovery_state_revision", json!(epoch)),
+        ("recovery_public_key", json!(hex(&public_key(seed)))),
+    ];
+    members.extend_from_slice(extra);
+    members
+}
+
+fn ids_of(list: &Value) -> Vec<String> {
+    list.as_array()
+        .unwrap_or_else(|| panic!("not a list: {list}"))
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The plan `M` carries.
+fn plan_of(challenge: &[u8]) -> Value {
+    let text = std::str::from_utf8(challenge).unwrap();
+    let canonical: Value =
+        serde_json::from_str(text.strip_prefix(CHALLENGE_PREFIX).unwrap()).unwrap();
+    canonical["plan"].clone()
+}
+
+/// Issues a challenge for operator key `credential`, rotating to
+/// `new_key`, with `anchor`; returns the operation ID and `M`.
+async fn issue_with(
+    server: &Server,
+    credential: u8,
+    new_key: &[u8],
+    anchor: &str,
+) -> (String, Vec<u8>) {
+    let mut request = issue_request(credential, new_key);
+    request["trust_anchor_ref"] = json!(anchor);
+    let reply = server.call(request).await;
+    let operation_id = reply["operation_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{reply}"))
+        .to_owned();
+    (operation_id, unhex(reply["challenge"].as_str().unwrap()))
+}
+
+/// `timestamptz 'epoch'` plus `$n` microseconds, exactly.
+const AT_MICROS: &str = "timestamptz 'epoch' + $2::bigint * interval '1 microsecond'";
+
+/// Inserts `count` enabled credentials of the first operator, IDs
+/// `prefix` and five digits; returns their IDs.
+async fn insert_credentials(pool: &PgPool, prefix: &str, count: usize) -> Vec<String> {
+    sqlx::query_scalar(
+        "INSERT INTO admin_credential (id, admin_id, public_identity, trust_anchor_ref, status) \
+         SELECT $1 || lpad(g::text, 5, '0'), (SELECT min(id) FROM admin_identity), \
+         'bulk-identity/' || $1 || g, 'deployment/bulk', 'enabled' \
+         FROM generate_series(1, $2::bigint) AS g RETURNING id",
+    )
+    .bind(prefix)
+    .bind(i64::try_from(count).unwrap())
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Revokes the credential `id` at `at`, as another writer would.
+async fn revoke_credential_at(pool: &PgPool, id: &str, at: SystemTime) {
+    let done = sqlx::query(AssertSqlSafe(format!(
+        "UPDATE admin_credential SET status = 'disabled', revoked_at = {AT_MICROS} WHERE id = $1"
+    )))
+    .bind(id)
+    .bind(micros_of(at))
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(done.rows_affected(), 1);
+}
+
+/// Inserts an instance operation row by raw SQL (an approval, a revocation,
+/// a row of another kind); `challenge` gives it a challenge hash and that
+/// expiry.
+#[allow(clippy::too_many_arguments)]
+async fn insert_operation(
+    pool: &PgPool,
+    id: &str,
+    kind: &str,
+    actor: &str,
+    approves: Option<&str>,
+    challenge: Option<SystemTime>,
+    plan: &Value,
+    outcome: &str,
+) {
+    let audit_id: String =
+        sqlx::query_scalar("SELECT min(id) FROM audit_event WHERE tenant_id IS NULL")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO administrative_operation (id, tenant_id, actor_id, kind, request_digest, \
+         expected_revision, immutable_plan, challenge_hash, expires_at, approves_operation_id, \
+         outcome, audit_id) VALUES ($1, NULL, $2, $3, $4, 1, $5::text::jsonb, $6, \
+         timestamptz 'epoch' + $7::bigint * interval '1 microsecond', $8, $9, $10)",
+    )
+    .bind(id)
+    .bind(actor)
+    .bind(kind)
+    .bind(vec![0xab_u8; 32])
+    .bind(plan.to_string())
+    .bind(challenge.map(|_| vec![0xcd_u8; 32]))
+    .bind(challenge.map(micros_of))
+    .bind(approves)
+    .bind(outcome)
+    .bind(audit_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Revokes the operation `id` at `at`, with its revocation operation row.
+async fn revoke_operation(pool: &PgPool, id: &str, at: SystemTime) {
+    let revocation = format!("{id}_revocation");
+    insert_operation(
+        pool,
+        &revocation,
+        "revoke",
+        "adm_revoker",
+        None,
+        None,
+        &json!({}),
+        "success",
+    )
+    .await;
+    let done = sqlx::query(AssertSqlSafe(format!(
+        "UPDATE administrative_operation SET revoked_at = {AT_MICROS}, \
+         revocation_operation_id = $3, revision = revision + 1 WHERE id = $1"
+    )))
+    .bind(id)
+    .bind(micros_of(at))
+    .bind(&revocation)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(done.rows_affected(), 1);
+}
+
+/// Waits until `count` sessions of the test database wait for a lock.
+async fn until_lock_waits(pool: &PgPool, count: i64) {
+    let waiting = "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
+                   AND datname = current_database()";
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while sqlx::query_scalar::<_, i64>(waiting)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        < count
+    {
+        assert!(Instant::now() < deadline, "fewer than {count} lock waits");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A session of its own on the test database, outside the pool.
+async fn holder(pool: &PgPool) -> PgConnection {
+    PgConnection::connect_with(&pool.connect_options())
+        .await
+        .unwrap()
+}
+
+fn spawn_call(server: &Arc<Server>, request: Value) -> JoinHandle<Value> {
+    let server = Arc::clone(server);
+    tokio::spawn(async move { server.call(request).await })
+}
+
+async fn stop_shared(server: Arc<Server>) {
+    let Ok(server) = Arc::try_unwrap(server) else {
+        panic!("the requests hold no server any more")
+    };
+    server.stop().await;
+}
+
+/// A [`SequentialIds`] that counts the IDs it gives, by kind, so a test
+/// sees what a request drew of every kind, the audit event's included,
+/// which never reaches the wire.
+struct CountingIds {
+    ids: SequentialIds,
+    drawn: Mutex<[u64; IdKind::ALL.len()]>,
+}
+
+impl CountingIds {
+    fn with_seed(seed: u64) -> Arc<Self> {
+        Arc::new(Self {
+            ids: SequentialIds::with_seed(seed),
+            drawn: Mutex::new([0; IdKind::ALL.len()]),
+        })
+    }
+
+    /// The IDs given so far of each kind, in [`IdKind::ALL`]'s order.
+    fn drawn(&self) -> Vec<(IdKind, u64)> {
+        IdKind::ALL
+            .into_iter()
+            .zip(*self.drawn.lock().unwrap())
+            .collect()
+    }
+}
+
+impl IdGenerator for CountingIds {
+    fn new_id(&self, kind: IdKind) -> Result<String, IdError> {
+        let id = self.ids.new_id(kind)?;
+        let index = IdKind::ALL.iter().position(|each| *each == kind).unwrap();
+        self.drawn.lock().unwrap()[index] += 1;
+        Ok(id)
+    }
+}
+
+/// `server.call(request)` for a `status` request, checked to write
+/// nothing (every row of every table unchanged, the audit chain's head
+/// included) and to draw no ID of any kind.
+async fn read(server: &Server, pool: &PgPool, counter: &CountingIds, request: Value) -> Value {
+    let rows = snapshot(pool).await;
+    let drawn = counter.drawn();
+    let reply = server.call(request).await;
+    assert_eq!(snapshot(pool).await, rows, "{reply}");
+    assert_eq!(counter.drawn(), drawn, "{reply}");
+    reply
+}
+
+/// Every state of a challenge from a real sequence, in the order of the
+/// recovery module's "Reading the state": `not_found` (an unknown ID, an
+/// approval, rows with a challenge hash and an expiry that are not an
+/// `operator_restoration` by `deployment_operator` of no tenant, and a row
+/// with an expiry but no challenge hash), `issued`, `expiring`
+/// from `expires_at` with `settles_at` the transaction timeout later,
+/// `expired` from `settles_at`, `retired` once another challenge is
+/// restored, and `restored` with the replacement and the revoked
+/// credentials, revoked afterwards or not (F1). The replies hold nothing
+/// of `M`, the signature or the replacement's key, and every read, the
+/// first included, writes nothing and draws no ID of any kind (`read`).
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn status_reports_each_challenge_state() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let counter = CountingIds::with_seed(1);
+    let server = Server::bind(
+        LocalTransport::new(
+            pool.clone(),
+            Arc::<TestClock>::clone(&clock),
+            Arc::<CountingIds>::clone(&counter),
+            None,
+        )
+        .with_settings(settings())
+        .unwrap(),
+        &dir.0.join("a.sock"),
+    )
+    .await;
+    let t0 = UNIX_EPOCH + T0;
+
+    // Before bootstrap: nothing, and an unknown ID is not found.
+    assert_eq!(
+        read(&server, &pool, &counter, status_request(None, None, None)).await,
+        status_reply(t0, &[])
+    );
+    assert_eq!(
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some("oper_unknown"), None, None)
+        )
+        .await,
+        status_reply(t0, &[("operation_state", json!("not_found"))])
+    );
+
+    bootstrap(&server).await;
+    let (first, first_m) = issue(&server, 2).await;
+    let expires = t0 + TTL;
+    let issued = state_and(
+        1,
+        &SEED,
+        &[
+            ("operation_state", json!("issued")),
+            ("expires_at", json!(micros_of(expires))),
+        ],
+    );
+    assert_eq!(
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, None)
+        )
+        .await,
+        status_reply(t0, &issued)
+    );
+
+    // Rows that are no recovery challenge: an approval of it, and rows with
+    // a challenge hash and an expiry of another kind or by another actor,
+    // bound to the state, which the filter alone makes `not_found`.
+    let plan = plan_of(&first_m);
+    insert_operation(
+        &pool,
+        "oper_approval",
+        "approve",
+        "adm_approver",
+        Some(&first),
+        None,
+        &json!({}),
+        "approved",
+    )
+    .await;
+    insert_operation(
+        &pool,
+        "oper_other_kind",
+        "route_bundle_prepare",
+        "deployment_operator",
+        None,
+        Some(expires),
+        &plan,
+        "issued",
+    )
+    .await;
+    insert_operation(
+        &pool,
+        "oper_other_actor",
+        "operator_restoration",
+        "adm_approver",
+        None,
+        Some(expires),
+        &plan,
+        "issued",
+    )
+    .await;
+    // An `operator_restoration` by `deployment_operator` with the first's
+    // challenge hash and expiry, but of a tenant (its audit event of that
+    // tenant, as the `0005` guard requires), and one with the first's
+    // expiry but no challenge hash, as `0005` allows.
+    registry::test_support::create_tenant(
+        &pool,
+        &NewTenant {
+            id: "ten_a".into(),
+            name: "Tenant A".into(),
+            secret_namespace: "ns_a".into(),
+            status: registry::Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    registry::test_support::append_audit_event(
+        &mut transaction,
+        &NewAuditEvent {
+            id: "evt_tenant".into(),
+            tenant_id: Some("ten_a".into()),
+            timestamp: t0,
+            actor: AuditActor::Operator("deployment_operator".into()),
+            action: "administrative_operation.create".into(),
+            object_id: "oper_tenant".into(),
+            previous_revision: None,
+            new_revision: Some(1),
+            outcome: "success".into(),
+        },
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    for (id, tenant, hash, audit) in [
+        ("oper_tenant", Some("ten_a"), true, Some("evt_tenant")),
+        ("oper_no_hash", None, false, None),
+    ] {
+        sqlx::query(
+            "INSERT INTO administrative_operation (id, tenant_id, actor_id, kind, \
+             request_digest, expected_revision, immutable_plan, challenge_hash, expires_at, \
+             outcome, audit_id) SELECT $2, $3, actor_id, kind, request_digest, \
+             expected_revision, immutable_plan, CASE WHEN $4 THEN challenge_hash END, \
+             expires_at, outcome, coalesce($5, audit_id) \
+             FROM administrative_operation WHERE id = $1",
+        )
+        .bind(&first)
+        .bind(id)
+        .bind(tenant)
+        .bind(hash)
+        .bind(audit)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    for id in [
+        "oper_unknown",
+        "oper_approval",
+        "oper_other_kind",
+        "oper_other_actor",
+        "oper_tenant",
+        "oper_no_hash",
+    ] {
+        assert_eq!(
+            read(
+                &server,
+                &pool,
+                &counter,
+                status_request(Some(id), None, None)
+            )
+            .await,
+            status_reply(
+                t0,
+                &state_and(1, &SEED, &[("operation_state", json!("not_found"))])
+            ),
+            "{id}"
+        );
+    }
+
+    // At `expires_at`, and until `settles_at`: expiring.
+    let expiring = |now: SystemTime| {
+        status_reply(
+            now,
+            &state_and(
+                1,
+                &SEED,
+                &[
+                    ("operation_state", json!("expiring")),
+                    ("expires_at", json!(micros_of(expires))),
+                    ("settles_at", json!(micros_of(expires + SETTLE))),
+                ],
+            ),
+        )
+    };
+    clock.advance(TTL);
+    assert_eq!(
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, None)
+        )
+        .await,
+        expiring(expires)
+    );
+    clock.advance(SETTLE - Duration::from_micros(1));
+    assert_eq!(
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, None)
+        )
+        .await,
+        expiring(expires + SETTLE - Duration::from_micros(1))
+    );
+    // From `settles_at`: expired.
+    clock.advance(Duration::from_micros(1));
+    let settled = expires + SETTLE;
+    assert_eq!(
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, None)
+        )
+        .await,
+        status_reply(
+            settled,
+            &state_and(
+                1,
+                &SEED,
+                &[
+                    ("operation_state", json!("expired")),
+                    ("expires_at", json!(micros_of(expires))),
+                ],
+            ),
+        )
+    );
+
+    // Another challenge, restored: the first is retired, the second
+    // restored with the replacement and the revoked credential.
+    let (second, second_m) = issue(&server, 3).await;
+    let signature = sign(&SEED, &second_m);
+    let restore = server.call(signed("restore", &second, &signature)).await;
+    let bootstrap_credential = ids(1, IdKind::AdminCredential, 1).remove(0);
+    assert_eq!(restore["revoked_credential_count"], 1, "{restore}");
+    let retired = status_reply(
+        settled,
+        &state_and(
+            2,
+            &NEW_SEED,
+            &[
+                ("operation_state", json!("retired")),
+                ("expires_at", json!(micros_of(expires))),
+            ],
+        ),
+    );
+    assert_eq!(
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, None)
+        )
+        .await,
+        retired
+    );
+    let second_plan = plan_of(&second_m);
+    let restored = |ids: Value| {
+        status_reply(
+            settled,
+            &state_and(
+                2,
+                &NEW_SEED,
+                &[
+                    ("operation_state", json!("restored")),
+                    ("expires_at", json!(micros_of(settled + TTL))),
+                    ("restored_at", json!(micros_of(settled))),
+                    ("admin_id", second_plan["admin_id"].clone()),
+                    ("credential_id", second_plan["credential_id"].clone()),
+                    ("binding_id", second_plan["binding_id"].clone()),
+                    ("revoked_credential_count", json!(1)),
+                    ("revoked_credential_ids", ids),
+                ],
+            ),
+        )
+    };
+    let full = restored(json!([bootstrap_credential]));
+    assert_eq!(
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&second), None, None)
+        )
+        .await,
+        full
+    );
+    assert_eq!(
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&second), None, Some(&bootstrap_credential))
+        )
+        .await,
+        restored(json!([]))
+    );
+    // `revoked_after` is ignored unless restored.
+    assert_eq!(
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, Some("cred_z"))
+        )
+        .await,
+        retired
+    );
+
+    // Nothing of `M`, the plan's key or identity, the digest or the
+    // signature.
+    let text = full.to_string();
+    for secret in [
+        hex(&second_m),
+        hex(&signature),
+        identity_of(3),
+        hex(&public_key(&SEED)),
+        second_plan["new_recovery_public_key"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    ] {
+        if secret == hex(&public_key(&NEW_SEED)) {
+            // The current recovery key is reported (F4).
+            continue;
+        }
+        assert!(!text.contains(&secret), "{secret}");
+    }
+
+    // Revoked after its consume, it stays restored (F1).
+    revoke_operation(&pool, &second, settled).await;
+    assert_eq!(
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&second), None, None)
+        )
+        .await,
+        full
+    );
+
+    // With a credential asked too: each read is checked by `read`.
+    for request in [
+        status_request(None, None, None),
+        status_request(Some(&first), Some(1), None),
+        status_request(Some(&second), Some(3), None),
+        status_request(Some(&second), Some(9), Some(&bootstrap_credential)),
+        status_request(Some("oper_approval"), None, Some("cred_a")),
+    ] {
+        let reply = read(&server, &pool, &counter, request).await;
+        assert!(reply["server_time"].is_i64(), "{reply}");
+    }
+    // What the writes drew, of every kind: the bootstrap an admin, a
+    // credential and a binding, each issue those of its replacement and an
+    // operation, and an audit event per write (two of the restore's: the
+    // restoration and the key rotation); the reads nothing.
+    let mut expected = vec![0; IdKind::ALL.len()];
+    for (kind, count) in [
+        (IdKind::AuditEvent, 5),
+        (IdKind::AdminIdentity, 3),
+        (IdKind::AdminCredential, 3),
+        (IdKind::AdminRoleBinding, 3),
+        (IdKind::AdministrativeOperation, 2),
+    ] {
+        expected[IdKind::ALL.iter().position(|each| *each == kind).unwrap()] = count;
+    }
+    assert_eq!(
+        counter.drawn(),
+        IdKind::ALL.into_iter().zip(expected).collect::<Vec<_>>()
+    );
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// A challenge revoked before any consume is `revoked`, and its restore
+/// is `not_restorable` (lead ruling (h)).
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_unconsumed_revoked_challenge_is_revoked() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    let t0 = UNIX_EPOCH + T0;
+    bootstrap(&server).await;
+    let (operation_id, challenge) = issue(&server, 2).await;
+    revoke_operation(&pool, &operation_id, t0).await;
+    let revoked = status_reply(
+        t0,
+        &state_and(
+            1,
+            &SEED,
+            &[
+                ("operation_state", json!("revoked")),
+                ("expires_at", json!(micros_of(t0 + TTL))),
+            ],
+        ),
+    );
+    assert_eq!(
+        server
+            .call(status_request(Some(&operation_id), None, None))
+            .await,
+        revoked
+    );
+    assert_eq!(
+        server
+            .call(signed("restore", &operation_id, &sign(&SEED, &challenge)))
+            .await,
+        error("not_restorable")
+    );
+    assert_eq!(
+        server
+            .call(status_request(Some(&operation_id), None, None))
+            .await,
+        revoked
+    );
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// A recovery state row whose `bootstrap_closed` is false (written by raw
+/// SQL past its trigger) is reported, but an operation asked against it,
+/// known or not, is `server_error` (F10).
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_unclosed_recovery_state_is_reported_and_its_challenges_are_not() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    let t0 = UNIX_EPOCH + T0;
+    bootstrap(&server).await;
+    let (operation_id, _) = issue(&server, 2).await;
+    sqlx::raw_sql(
+        "BEGIN; \
+         ALTER TABLE recovery_state DISABLE TRIGGER recovery_state_set_once; \
+         UPDATE recovery_state SET bootstrap_closed = false, revision = revision + 1; \
+         ALTER TABLE recovery_state ENABLE ALWAYS TRIGGER recovery_state_set_once; \
+         COMMIT",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let reply = server.call(status_request(None, Some(1), None)).await;
+    assert_eq!(reply["instance_id"], INSTANCE, "{reply}");
+    assert_eq!(reply["recovery_key_epoch"], 1, "{reply}");
+    assert_eq!(reply["enrolled_state"], "enabled", "{reply}");
+    assert_eq!(reply["server_time"], micros_of(t0), "{reply}");
+    for id in [operation_id.as_str(), "oper_unknown"] {
+        assert_eq!(
+            server.call(status_request(Some(id), Some(1), None)).await,
+            error("server_error"),
+            "{id}"
+        );
+    }
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// With the recovery state row gone (deleted by raw SQL past its
+/// trigger), a recovery challenge is `server_error` whatever its own
+/// state, restored, revoked or issued; an ID that is no challenge is still
+/// `not_found`, and `status` without an operation reports no state.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_missing_recovery_state_leaves_no_challenge_state() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    let t0 = UNIX_EPOCH + T0;
+    bootstrap(&server).await;
+    let (revoked, _) = issue(&server, 2).await;
+    let (restored, challenge) = issue(&server, 3).await;
+    revoke_operation(&pool, &revoked, t0).await;
+    let reply = server
+        .call(signed("restore", &restored, &sign(&SEED, &challenge)))
+        .await;
+    assert_eq!(reply["recovery_key_epoch"], 2, "{reply}");
+    let (issued, _) = issue_with(&server, 4, &public_key(&THIRD_SEED), ANCHOR).await;
+    for (id, state) in [
+        (&revoked, "revoked"),
+        (&restored, "restored"),
+        (&issued, "issued"),
+    ] {
+        let reply = server.call(status_request(Some(id), None, None)).await;
+        assert_eq!(reply["operation_state"], state, "{reply}");
+    }
+    sqlx::raw_sql(
+        "BEGIN; \
+         ALTER TABLE recovery_state DISABLE TRIGGER recovery_state_no_delete; \
+         DELETE FROM recovery_state; \
+         ALTER TABLE recovery_state ENABLE ALWAYS TRIGGER recovery_state_no_delete; \
+         COMMIT",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for id in [&revoked, &restored, &issued] {
+        assert_eq!(
+            server.call(status_request(Some(id), None, None)).await,
+            error("server_error"),
+            "{id}"
+        );
+    }
+    assert_eq!(
+        server
+            .call(status_request(Some("oper_unknown"), None, None))
+            .await,
+        status_reply(t0, &[("operation_state", json!("not_found"))])
+    );
+    assert_eq!(
+        server.call(status_request(None, None, None)).await,
+        status_reply(t0, &[])
+    );
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// An operation of another kind consumed at a restoration's `consumed_at`
+/// (written by raw SQL) is `not_found`, and the read's kind gate leaves it
+/// no count or page: [`revoked_by_restoration`] finds none for it, and
+/// finds the restoration's own.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_consumed_operation_of_another_kind_is_not_found() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    let t0 = UNIX_EPOCH + T0;
+    bootstrap(&server).await;
+    let (restored, challenge) = issue(&server, 2).await;
+    let reply = server
+        .call(signed("restore", &restored, &sign(&SEED, &challenge)))
+        .await;
+    assert_eq!(reply["revoked_credential_count"], 1, "{reply}");
+    insert_operation(
+        &pool,
+        "oper_approval",
+        "approve",
+        "adm_approver",
+        Some(&restored),
+        None,
+        &json!({}),
+        "approved",
+    )
+    .await;
+    let done = sqlx::query(
+        "UPDATE administrative_operation SET revision = revision + 1, consumed_at = \
+         (SELECT consumed_at FROM administrative_operation WHERE id = $2) WHERE id = $1",
+    )
+    .bind("oper_approval")
+    .bind(&restored)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(done.rows_affected(), 1);
+    assert_eq!(
+        server
+            .call(status_request(Some("oper_approval"), None, None))
+            .await,
+        status_reply(
+            t0,
+            &state_and(2, &NEW_SEED, &[("operation_state", json!("not_found"))])
+        )
+    );
+    let mut transaction = pool.begin().await.unwrap();
+    assert!(matches!(
+        revoked_by_restoration(&mut transaction, "oper_approval").await,
+        Err(StatusError::Inconsistent)
+    ));
+    let page = revoked_by_restoration(&mut transaction, &restored)
+        .await
+        .unwrap();
+    assert_eq!(
+        (page.count, page.ids),
+        (1, ids(1, IdKind::AdminCredential, 1))
+    );
+    transaction.rollback().await.unwrap();
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// Whether a `status` reply matches the bootstrap `request` that the
+/// client sent (lead ruling (b)): the instance, the recovery key, an
+/// enrolled mTLS key and the SHA-256 of the trust anchor reference sent.
+fn matches_bootstrap(reply: &Value, request: &Value) -> bool {
+    reply["instance_id"] == request["instance_id"]
+        && reply["recovery_public_key"] == request["recovery_public_key"]
+        && !reply["enrolled_state"].is_null()
+        && reply["enrolled_state"] != "not_found"
+        && reply["enrolled_trust_anchor_sha256"]
+            == json!(sha256_hex(request["trust_anchor_ref"].as_str().unwrap()))
+}
+
+/// The bootstrap reconcile by the `credential_spki` sent: nothing before
+/// it; after it the instance, the recovery key, the enrolled key and the
+/// digest of the exact `trust_anchor_ref` match the request sent, and not
+/// a request with another recovery key, another anchor or another mTLS
+/// key; a credential disabled but not revoked is `disabled`; after a
+/// restore the old key is `revoked` and still found, and the
+/// replacement's digest is of its own anchor's UTF-8 bytes.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn status_reconciles_a_bootstrap() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    let t0 = UNIX_EPOCH + T0;
+    let request = bootstrap_request(1, &public_key(&SEED));
+
+    let before = server.call(status_request(None, Some(1), None)).await;
+    assert_eq!(
+        before,
+        status_reply(t0, &[("enrolled_state", json!("not_found"))])
+    );
+    assert!(!matches_bootstrap(&before, &request));
+
+    bootstrap(&server).await;
+    let after = server.call(status_request(None, Some(1), None)).await;
+    let enrolled = |state: &str| {
+        status_reply(
+            t0,
+            &state_and(
+                1,
+                &SEED,
+                &[
+                    ("enrolled_state", json!(state)),
+                    (
+                        "enrolled_admin_id",
+                        json!(ids(1, IdKind::AdminIdentity, 1)[0]),
+                    ),
+                    (
+                        "enrolled_credential_id",
+                        json!(ids(1, IdKind::AdminCredential, 1)[0]),
+                    ),
+                    ("enrolled_trust_anchor_sha256", json!(sha256_hex(ANCHOR))),
+                ],
+            ),
+        )
+    };
+    assert_eq!(after, enrolled("enabled"));
+    assert!(matches_bootstrap(&after, &request));
+    let mut other_key = request.clone();
+    other_key["recovery_public_key"] = json!(hex(&public_key(&THIRD_SEED)));
+    assert!(!matches_bootstrap(&after, &other_key));
+    let mut other_anchor = request.clone();
+    other_anchor["trust_anchor_ref"] = json!("deployment/other-ca");
+    assert!(!matches_bootstrap(&after, &other_anchor));
+    // A credential of the operator disabled but not revoked, written by
+    // other means: `disabled`, with its own anchor's digest.
+    sqlx::query(
+        "INSERT INTO admin_credential (id, admin_id, public_identity, trust_anchor_ref, status) \
+         VALUES ('cred_disabled', $1, $2, 'deployment/disabled', 'disabled')",
+    )
+    .bind(ids(1, IdKind::AdminIdentity, 1).remove(0))
+    .bind(identity_of(5))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        server.call(status_request(None, Some(5), None)).await,
+        status_reply(
+            t0,
+            &state_and(
+                1,
+                &SEED,
+                &[
+                    ("enrolled_state", json!("disabled")),
+                    (
+                        "enrolled_admin_id",
+                        json!(ids(1, IdKind::AdminIdentity, 1)[0])
+                    ),
+                    ("enrolled_credential_id", json!("cred_disabled")),
+                    (
+                        "enrolled_trust_anchor_sha256",
+                        json!(sha256_hex("deployment/disabled"))
+                    ),
+                ],
+            ),
+        )
+    );
+    let not_enrolled = server.call(status_request(None, Some(9), None)).await;
+    assert_eq!(not_enrolled["enrolled_state"], "not_found");
+    assert!(!matches_bootstrap(
+        &not_enrolled,
+        &bootstrap_request(9, &public_key(&SEED))
+    ));
+
+    // After a restore whose replacement has a non-ASCII anchor.
+    let anchor = "deployment/caf\u{e9}-ca";
+    let (operation_id, challenge) = issue_with(&server, 2, &public_key(&NEW_SEED), anchor).await;
+    let reply = server
+        .call(signed("restore", &operation_id, &sign(&SEED, &challenge)))
+        .await;
+    assert_eq!(reply["recovery_key_epoch"], 2, "{reply}");
+    let old = server.call(status_request(None, Some(1), None)).await;
+    assert_eq!(old["enrolled_state"], "revoked", "{old}");
+    assert_eq!(
+        old["enrolled_trust_anchor_sha256"],
+        json!(sha256_hex(ANCHOR))
+    );
+    // The old instance key is gone: the bootstrap no longer matches.
+    assert!(!matches_bootstrap(&old, &request));
+    let new = server.call(status_request(None, Some(2), None)).await;
+    let plan = plan_of(&challenge);
+    assert_eq!(new["enrolled_state"], "enabled", "{new}");
+    assert_eq!(new["enrolled_admin_id"], plan["admin_id"]);
+    assert_eq!(new["enrolled_credential_id"], plan["credential_id"]);
+    assert_eq!(
+        new["enrolled_trust_anchor_sha256"],
+        json!(hex(&Sha256::digest("deployment/caf\u{e9}-ca".as_bytes())))
+    );
+    assert_ne!(
+        new["enrolled_trust_anchor_sha256"],
+        json!(sha256_hex("deployment/caf\\u00e9-ca"))
+    );
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// Walks the revoked credentials of the restored `operation_id` with
+/// `status`, from `held` (the restore reply's list, or nothing): every
+/// page has the same `count`, exactly `min(page, count - held)` IDs, in
+/// byte order and after the `revoked_after` sent. Returns every ID.
+async fn walk(
+    server: &Server,
+    operation_id: &str,
+    count: usize,
+    mut held: Vec<String>,
+) -> Vec<String> {
+    let mut pages = 0;
+    while held.len() < count || pages == 0 {
+        let after = held.last().cloned();
+        let reply = server
+            .call(status_request(Some(operation_id), None, after.as_deref()))
+            .await;
+        assert_eq!(reply["operation_state"], "restored", "{reply}");
+        assert_eq!(reply["revoked_credential_count"], count, "{reply}");
+        let page = ids_of(&reply["revoked_credential_ids"]);
+        assert_eq!(page.len(), PAGE.min(count - held.len()));
+        assert!(page.windows(2).all(|pair| pair[0] < pair[1]));
+        if let (Some(after), Some(first)) = (&after, page.first()) {
+            assert!(first > after, "{first} after {after}");
+        }
+        held.extend(page);
+        pages += 1;
+    }
+    held
+}
+
+/// Restores revoking 999, 1000, 1001 and 2001 credentials, the clock
+/// advanced between them (F5): each restore reply has the exact count and
+/// the first `min(count, 1000)` IDs in byte order (upper case before lower
+/// case), and the `status` pages after it join to exactly that
+/// restoration's set, without repeats, and so does a walk from `status`
+/// alone; past the last ID a page is empty.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_restore_reply_and_status_page_the_revoked_credentials() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    bootstrap(&server).await;
+    let seeds = [SEED, [0x61; 32], [0x62; 32], [0x63; 32], [0x64; 32]];
+    let mut restorations: Vec<String> = Vec::new();
+    for (round, count) in [999_usize, 1000, 1001, 2001].into_iter().enumerate() {
+        clock.advance(Duration::from_secs(1));
+        let mut expected: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM admin_credential WHERE revoked_at IS NULL")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(expected.len(), 1);
+        let extra = count - 1;
+        expected.extend(insert_credentials(&pool, &format!("cred_{round}a"), extra / 2).await);
+        expected
+            .extend(insert_credentials(&pool, &format!("cred_{round}B"), extra - extra / 2).await);
+        expected.sort_unstable();
+        assert_eq!(expected.len(), count);
+        let credential = u8::try_from(round + 2).unwrap();
+        let (operation_id, challenge) =
+            issue_with(&server, credential, &public_key(&seeds[round + 1]), ANCHOR).await;
+        let reply = server
+            .call(signed(
+                "restore",
+                &operation_id,
+                &sign(&seeds[round], &challenge),
+            ))
+            .await;
+        assert_eq!(reply["revoked_credential_count"], count, "round {round}");
+        let first = ids_of(&reply["revoked_credential_ids"]);
+        assert_eq!(first, expected[..count.min(PAGE)], "round {round}");
+        assert_eq!(
+            walk(&server, &operation_id, count, first).await,
+            expected,
+            "round {round}"
+        );
+        assert_eq!(
+            walk(&server, &operation_id, count, Vec::new()).await,
+            expected,
+            "round {round}"
+        );
+        let past = server
+            .call(status_request(
+                Some(&operation_id),
+                None,
+                expected.last().map(String::as_str),
+            ))
+            .await;
+        assert_eq!(past["revoked_credential_count"], count);
+        assert_eq!(past["revoked_credential_ids"], json!([]));
+        restorations.push(operation_id);
+    }
+    // Earlier restorations still list only their own credentials.
+    let first = server
+        .call(status_request(Some(&restorations[0]), None, None))
+        .await;
+    assert_eq!(first["revoked_credential_count"], 999, "{first}");
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// The documented tie (lead ruling (a)), with a clock that never moves: a
+/// credential revoked at the restore's own microsecond before it is
+/// counted and listed by the restore reply and by `status`, which take
+/// them from the same predicate, not from the restore's revoke; one
+/// revoked at that microsecond between two `status` pages raises the count
+/// on the second page, and a walk restarted from `status` alone lists it.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_tie_at_the_restores_microsecond_is_listed() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    let t0 = UNIX_EPOCH + T0;
+    bootstrap(&server).await;
+    let mut expected = insert_credentials(&pool, "cred_b", PAGE).await;
+    expected.push(ids(1, IdKind::AdminCredential, 1).remove(0));
+    let early = insert_credentials(&pool, "cred_!early", 1).await.remove(0);
+    revoke_credential_at(&pool, &early, t0).await;
+    expected.push(early.clone());
+    expected.sort_unstable();
+    assert_eq!(expected[0], early);
+
+    let (operation_id, challenge) = issue(&server, 2).await;
+    let reply = server
+        .call(signed("restore", &operation_id, &sign(&SEED, &challenge)))
+        .await;
+    assert_eq!(reply["revoked_credential_count"], PAGE + 2, "{reply}");
+    assert_eq!(ids_of(&reply["revoked_credential_ids"]), expected[..PAGE]);
+
+    let first = server
+        .call(status_request(Some(&operation_id), None, None))
+        .await;
+    assert_eq!(first["revoked_credential_count"], PAGE + 2);
+    assert_eq!(ids_of(&first["revoked_credential_ids"]), expected[..PAGE]);
+    // Revoked at the same microsecond between two pages.
+    let late = insert_credentials(&pool, "cred_~late", 1).await.remove(0);
+    revoke_credential_at(&pool, &late, t0).await;
+    let second = server
+        .call(status_request(
+            Some(&operation_id),
+            None,
+            Some(&expected[PAGE - 1]),
+        ))
+        .await;
+    assert_eq!(second["revoked_credential_count"], PAGE + 3, "{second}");
+    expected.push(late);
+    assert_eq!(ids_of(&second["revoked_credential_ids"]), expected[PAGE..]);
+    // The count changed: the walk restarts from `status` alone.
+    assert_eq!(
+        walk(&server, &operation_id, PAGE + 3, Vec::new()).await,
+        expected
+    );
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// The barrier (F6): `status` waits for a restore that holds the recovery
+/// state (here blocked at its audit append, from another transport), and
+/// sees `issued` once that restore is rolled back (cancelled), then
+/// `restored` once the next one commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn status_waits_at_the_barrier_for_a_restore() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let writer = Arc::new(serve(&dir, "a.sock", &pool, &clock, 1).await);
+    let reader = Arc::new(serve(&dir, "b.sock", &pool, &clock, 2).await);
+    bootstrap(&writer).await;
+    let (operation_id, challenge) = issue(&writer, 2).await;
+    let restore = signed("restore", &operation_id, &sign(&SEED, &challenge));
+    let status = status_request(Some(&operation_id), None, None);
+    let mut holder = holder(&pool).await;
+
+    for commit in [false, true] {
+        let mut head = holder.begin().await.unwrap();
+        sqlx::query("SELECT FROM audit_chain_head FOR UPDATE")
+            .execute(&mut *head)
+            .await
+            .unwrap();
+        let restored = spawn_call(&writer, restore.clone());
+        until_lock_waits(&pool, 1).await;
+        let read = spawn_call(&reader, status.clone());
+        until_lock_waits(&pool, 2).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!read.is_finished(), "the status did not wait");
+        if commit {
+            head.commit().await.unwrap();
+            let restored = restored.await.unwrap();
+            assert_eq!(restored["recovery_key_epoch"], 2, "{restored}");
+            let read = read.await.unwrap();
+            assert_eq!(read["operation_state"], "restored", "{read}");
+            assert_eq!(read["revoked_credential_count"], 1, "{read}");
+        } else {
+            let cancelled: Vec<bool> = sqlx::query_scalar(
+                "SELECT pg_cancel_backend(pid) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND datname = current_database() \
+                 AND query LIKE '%audit_chain_head%'",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(cancelled, [true]);
+            assert_eq!(restored.await.unwrap(), error("auth_unavailable"));
+            let read = read.await.unwrap();
+            assert_eq!(read["operation_state"], "issued", "{read}");
+            head.rollback().await.unwrap();
+        }
+    }
+    holder.close().await.unwrap();
+    stop_shared(writer).await;
+    stop_shared(reader).await;
+    db.drop([pool]).await;
+}
+
+/// No cycle (F2): with the recovery state held elsewhere, a restore waits
+/// at its step 2 holding every credential's lock, and a `status` for one
+/// of those credentials waits at the barrier; on release all end, none
+/// with a deadlock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn status_and_a_waiting_restore_do_not_deadlock() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let writer = Arc::new(serve(&dir, "a.sock", &pool, &clock, 1).await);
+    let reader = Arc::new(serve(&dir, "b.sock", &pool, &clock, 2).await);
+    bootstrap(&writer).await;
+    let (operation_id, challenge) = issue(&writer, 2).await;
+    let mut holder = holder(&pool).await;
+    let mut state = holder.begin().await.unwrap();
+    sqlx::query("SELECT FROM recovery_state FOR NO KEY UPDATE")
+        .execute(&mut *state)
+        .await
+        .unwrap();
+    let restored = spawn_call(
+        &writer,
+        signed("restore", &operation_id, &sign(&SEED, &challenge)),
+    );
+    until_lock_waits(&pool, 1).await;
+    let read = spawn_call(&reader, status_request(Some(&operation_id), Some(1), None));
+    until_lock_waits(&pool, 2).await;
+    state.rollback().await.unwrap();
+    let restored = restored.await.unwrap();
+    assert_eq!(restored["recovery_key_epoch"], 2, "{restored}");
+    let read = read.await.unwrap();
+    assert!(
+        read["operation_state"] == "restored" || read["operation_state"] == "issued",
+        "{read}"
+    );
+    holder.close().await.unwrap();
+    stop_shared(writer).await;
+    stop_shared(reader).await;
+    db.drop([pool]).await;
+}
+
+/// No lock after the barrier (F2, (h)): with a credential's row held
+/// `FOR NO KEY UPDATE` elsewhere and the recovery state free, a `status`
+/// for that credential completes at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn status_takes_no_credential_lock() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    bootstrap(&server).await;
+    let (operation_id, _) = issue(&server, 2).await;
+    let mut holder = holder(&pool).await;
+    let mut credential = holder.begin().await.unwrap();
+    sqlx::query("SELECT FROM admin_credential WHERE public_identity = $1 FOR NO KEY UPDATE")
+        .bind(identity_of(1))
+        .execute(&mut *credential)
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(
+        Duration::from_secs(5),
+        server.call(status_request(Some(&operation_id), Some(1), None)),
+    )
+    .await
+    .expect("the status waited for the credential's lock");
+    assert_eq!(reply["enrolled_state"], "enabled", "{reply}");
+    assert_eq!(reply["operation_state"], "issued", "{reply}");
+    credential.rollback().await.unwrap();
+    holder.close().await.unwrap();
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// `server_time` is read after the barrier (F3): a `status` held at the
+/// barrier while the clock moves past `settles_at` reports the moved time
+/// and `expired`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn server_time_is_read_after_the_barrier() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = Arc::new(serve(&dir, "a.sock", &pool, &clock, 1).await);
+    let t0 = UNIX_EPOCH + T0;
+    bootstrap(&server).await;
+    let (operation_id, _) = issue(&server, 2).await;
+    let mut holder = holder(&pool).await;
+    let mut state = holder.begin().await.unwrap();
+    sqlx::query("SELECT FROM recovery_state FOR NO KEY UPDATE")
+        .execute(&mut *state)
+        .await
+        .unwrap();
+    let read = spawn_call(&server, status_request(Some(&operation_id), None, None));
+    until_lock_waits(&pool, 1).await;
+    clock.advance(TTL + SETTLE);
+    state.rollback().await.unwrap();
+    assert_eq!(
+        read.await.unwrap(),
+        status_reply(
+            t0 + TTL + SETTLE,
+            &state_and(
+                1,
+                &SEED,
+                &[
+                    ("operation_state", json!("expired")),
+                    ("expires_at", json!(micros_of(t0 + TTL))),
+                ],
+            ),
+        )
+    );
+    holder.close().await.unwrap();
+    stop_shared(server).await;
+    db.drop([pool]).await;
+}
+
+/// A clock that, once armed, blocks its next read until the test releases
+/// it: a `status` is then held between its barrier and its statement.
+struct HeldClock {
+    time: SystemTime,
+    hold: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+}
+
+impl Clock for HeldClock {
+    fn now(&self) -> SystemTime {
+        let held = self.hold.lock().unwrap().take();
+        if let Some((entered, release)) = held {
+            entered.send(()).unwrap();
+            // Off the runtime's worker, whose other tasks must go on.
+            tokio::task::block_in_place(|| release.recv().unwrap());
+        }
+        self.time
+    }
+}
+
+/// The barrier's lock is released before the read (the savepoint is
+/// rolled back): while a `status` is held after the barrier, another
+/// session locks the recovery state `NOWAIT`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_barrier_is_released_before_the_read() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = Arc::new(HeldClock {
+        time: UNIX_EPOCH + T0,
+        hold: Mutex::new(None),
+    });
+    let transport = LocalTransport::new(
+        pool.clone(),
+        Arc::clone(&clock) as Arc<dyn Clock + Send>,
+        Arc::new(SequentialIds::with_seed(1)),
+        None,
+    )
+    .with_settings(settings())
+    .unwrap();
+    let server = Arc::new(Server::bind(transport, &dir.socket()).await);
+    bootstrap(&server).await;
+    let mut holder = holder(&pool).await;
+    let (entered, entered_here) = std::sync::mpsc::channel();
+    let (release_here, release) = std::sync::mpsc::channel();
+    *clock.hold.lock().unwrap() = Some((entered, release));
+    let read = spawn_call(&server, status_request(None, Some(1), None));
+    tokio::task::spawn_blocking(move || entered_here.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the status never read the clock");
+    let mut state = holder.begin().await.unwrap();
+    let locked = sqlx::query("SELECT FROM recovery_state FOR UPDATE NOWAIT")
+        .execute(&mut *state)
+        .await;
+    state.rollback().await.unwrap();
+    release_here.send(()).unwrap();
+    let read = read.await.unwrap();
+    locked.expect("the barrier's lock was still held after the barrier");
+    assert_eq!(read["enrolled_state"], "enabled", "{read}");
+    holder.close().await.unwrap();
+    stop_shared(server).await;
+    db.drop([pool]).await;
+}
+
+/// The refusals of a `status` request, before the store: a missing,
+/// mistyped or extra member, `revoked_after` without `operation_id`, a NUL
+/// in an ID, and a `credential_spki` that is not lowercase hexadecimal of
+/// one DER `SubjectPublicKeyInfo`; a valid request reaches the
+/// (unreachable) store, `auth_unavailable`.
+#[tokio::test]
+async fn status_requests_are_checked_before_the_store() {
+    let dir = TempDir::new();
+    let server = Server::bind(
+        transport(&unreachable_pool(), TestClock::new(), 1, None),
+        &dir.socket(),
+    )
+    .await;
+    for request in [
+        status_request(None, None, None),
+        status_request(Some("oper_1"), Some(1), Some("cred_1")),
+        status_request(Some(""), None, Some("")),
+    ] {
+        assert_eq!(
+            server.call(request.clone()).await,
+            error("auth_unavailable"),
+            "{request}"
+        );
+    }
+    let mut refused = vec![
+        status_request(None, None, Some("cred_1")),
+        status_request(Some("oper\u{0}1"), None, None),
+        status_request(Some("oper_1"), None, Some("cred\u{0}1")),
+        json!({"op": "status", "operation_id": null, "credential_spki": null}),
+        json!({"op": "status", "operation_id": null, "credential_spki": null, "revoked_after": null, "now": 1}),
+        json!({"op": "status", "operation_id": 1, "credential_spki": null, "revoked_after": null}),
+    ];
+    for spki in [
+        "zz",
+        "0",
+        "00",
+        &spki(1).to_uppercase(),
+        &format!("{}00", spki(1)),
+    ] {
+        refused.push(json!({
+            "op": "status", "operation_id": null, "credential_spki": spki, "revoked_after": null,
+        }));
+    }
+    for request in refused {
+        assert_eq!(
+            server.call(request.clone()).await,
+            error("invalid_request"),
+            "{request}"
+        );
+    }
+    server.stop().await;
 }
