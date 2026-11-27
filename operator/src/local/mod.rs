@@ -246,8 +246,8 @@ pub enum NotSent {
     /// the call's thread could not start.
     Connect(io::ErrorKind),
     /// [`Timeouts::total`] ran out before anything was written: while
-    /// connecting (a connection made later is dropped before anything is
-    /// written to it), or between the connect and the first write.
+    /// connecting or setting the first write's wait (a connection made
+    /// later is dropped before anything is written to it).
     TimedOut,
     /// The connection refused the wait of the first write, with the error's
     /// kind ([`HalfClose::set_write_wait`]); nothing was written to it.
@@ -292,7 +292,8 @@ pub enum UnknownOutcome {
     /// A refusal whose code is not in [`ErrorCode::ALL`].
     UnknownCode,
     /// [`Timeouts::total`] or [`Timeouts::idle`] ran out once the request
-    /// may have been written, before the end of the reply.
+    /// may have been written: while sending the request (a part of it
+    /// written, maybe) or waiting for the reply, before its end.
     TimedOut,
     /// The connection failed, with the error's kind: a write or a reset
     /// after which what was read is not a refusal (the server did not read
@@ -318,7 +319,7 @@ impl fmt::Display for UnknownOutcome {
             Self::NotUtf8 => "the reply is not UTF-8",
             Self::Malformed => "the reply is not a reply of the request's operation",
             Self::UnknownCode => "the reply refuses with an unknown code",
-            Self::TimedOut => "the wait for the reply ran out",
+            Self::TimedOut => "a wait ran out while sending the request or waiting for the reply",
             Self::ConnectionLost(_) => "the connection failed before a reply could be believed",
             Self::UncertainCommit(_) => "a write failed in the store, maybe in its commit",
             Self::ChallengeMismatch => "the issued reply does not match its challenge",

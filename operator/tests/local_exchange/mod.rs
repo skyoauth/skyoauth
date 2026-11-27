@@ -946,6 +946,8 @@ struct Plan {
     /// The failure of the setting of the write wait, from the given one on
     /// (0: the first, before any write).
     write_waits: Option<(usize, io::ErrorKind)>,
+    /// How long each setting of the write wait takes, from the given one on.
+    write_wait_delay: Option<(usize, Duration)>,
 }
 
 impl Plan {
@@ -961,6 +963,7 @@ impl Plan {
             close: None,
             read_waits: None,
             write_waits: None,
+            write_wait_delay: None,
         }
     }
 }
@@ -1019,9 +1022,14 @@ impl HalfClose for Scripted {
     }
 
     fn set_write_wait(&mut self, wait: Option<Duration>) -> io::Result<()> {
-        self.seen.lock().unwrap().write_waits.push(wait);
         let this = self.write_waits_set;
         self.write_waits_set += 1;
+        if let Some((from, delay)) = self.plan.write_wait_delay
+            && this >= from
+        {
+            thread::sleep(delay);
+        }
+        self.seen.lock().unwrap().write_waits.push(wait);
         fail(
             self.plan
                 .write_waits
@@ -1099,9 +1107,9 @@ fn long_bootstrap() -> Request {
 }
 
 /// A line longer than a chunk is offered a chunk at a time, each offer at
-/// most [`WRITE_CHUNK`] bytes and each after its own wait is set, whether
-/// the stream takes whole offers or part of each; the whole line is
-/// written and the call succeeds.
+/// most [`WRITE_CHUNK`] bytes and each after its own wait is set, and the
+/// flush after one more, whether the stream takes whole offers or part of
+/// each; the whole line is written and the call succeeds.
 #[test]
 fn a_long_line_is_offered_a_chunk_at_a_time() {
     let long = long_bootstrap();
@@ -1128,8 +1136,41 @@ fn a_long_line_is_offered_a_chunk_at_a_time() {
             "{per_write}: {:?}",
             seen.offers
         );
-        assert_eq!(seen.write_waits.len(), seen.offers.len(), "{per_write}");
+        // One wait per write, and the flush's.
+        assert_eq!(seen.write_waits.len(), seen.offers.len() + 1, "{per_write}");
+        assert!(seen.flushed, "{per_write}");
     }
+}
+
+/// A setting of the write wait that returns after the total has run out
+/// (a bridge, say) stops the writing before the next write. Before the
+/// first write, nothing is written and the call is not sent, for the
+/// caller as for its thread; before a later chunk, the call is unknown
+/// (part of the line was written), and nothing more is written, flushed or
+/// closed.
+#[test]
+fn a_wait_set_past_the_total_stops_the_writing() {
+    let timeouts = Timeouts {
+        total: Duration::from_millis(100),
+        idle: TEST_WAIT,
+    };
+    let reply = golden_success(Op::Bootstrap);
+    let slow = |from| Plan {
+        write_wait_delay: Some((from, Duration::from_millis(300))),
+        ..Plan::new(&reply)
+    };
+    let (outcome, seen) = scripted_request(&long_bootstrap(), slow(0), timeouts);
+    assert_eq!(outcome, Err(CallError::NotSent(NotSent::TimedOut)));
+    assert!(
+        seen.offers.is_empty() && seen.written.is_empty(),
+        "{seen:?}"
+    );
+    assert!(!seen.flushed && !seen.closed && seen.reads == 0, "{seen:?}");
+    let (outcome, seen) = scripted_request(&long_bootstrap(), slow(1), timeouts);
+    assert_eq!(outcome, Err(CallError::Unknown(UnknownOutcome::TimedOut)));
+    assert_eq!(seen.offers, [WRITE_CHUNK], "{seen:?}");
+    assert_eq!(seen.written.len(), WRITE_CHUNK);
+    assert!(!seen.flushed && !seen.closed && seen.reads == 0, "{seen:?}");
 }
 
 /// The waits set: before each write, the idle timeout or what is left of

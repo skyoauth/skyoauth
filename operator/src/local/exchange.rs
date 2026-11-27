@@ -248,9 +248,13 @@ impl Op {
 /// closed before it can have answered with a refusal, never a success.
 ///
 /// The line is written in chunks of at most 4 KiB, one `write` each.
-/// Before each (its wait set again), before the flush and before the end of
-/// the write half, what is left of [`Timeouts::total`] is checked: once the
-/// total has run out (the caller has then given up), nothing more is sent.
+/// Before each, and before the flush, the wait is set again; after each
+/// setting, and before the end of the write half, what is left of
+/// [`Timeouts::total`] is checked: once the total has run out (the caller
+/// has then given up), nothing more is sent. Until the first write may
+/// start, the call is not sent: a total that runs out while connecting or
+/// setting the first wait is [`NotSent::TimedOut`] for the caller and for
+/// its thread alike.
 /// (A socket's send timeout bounds each wait within a send, not the whole
 /// send, on macOS and the BSDs: a large line offered at once to a slow
 /// server could still be written long after the total.) A wait
@@ -415,7 +419,7 @@ impl<C: Connector> LocalClient<C> {
             return Err(NotSent::InvalidTimeouts.into());
         }
         let deadline = Instant::now().checked_add(total);
-        let phase = Arc::new(AtomicU8::new(CONNECTING));
+        let phase = Arc::new(AtomicU8::new(UNSENT));
         let (sender, receiver) = mpsc::sync_channel(1);
         let connector = Arc::clone(&self.connector);
         let worker_phase = Arc::clone(&phase);
@@ -486,19 +490,19 @@ fn challenge_of(reply: &Issued) -> Result<Challenge, CallError> {
     }
 }
 
-/// The phase of a call, shared by the caller and its thread: connecting
-/// (nothing written), then either writing (the thread may write) or given
-/// up (the caller stopped waiting; the thread must not write). Whichever
-/// leaves `CONNECTING` first decides.
-const CONNECTING: u8 = 0;
+/// The phase of a call, shared by the caller and its thread: unsent (the
+/// thread connects and sets the first write's wait; nothing written), then
+/// either writing (the thread may write) or given up (the caller stopped
+/// waiting; the thread must not write). Whichever leaves `UNSENT` first
+/// decides, so the caller's not sent is never followed by a write.
+const UNSENT: u8 = 0;
 const WRITING: u8 = 1;
 const GAVE_UP: u8 = 2;
 
-/// The caller stops waiting: not sent while the thread is still
-/// connecting, which it can then no longer write after; unknown once it
-/// may have written.
+/// The caller stops waiting: not sent while the thread has not started
+/// writing, which it then never does; unknown once it may have written.
 fn give_up(phase: &AtomicU8) -> CallError {
-    match phase.compare_exchange(CONNECTING, GAVE_UP, Ordering::AcqRel, Ordering::Acquire) {
+    match phase.compare_exchange(UNSENT, GAVE_UP, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => CallError::NotSent(NotSent::TimedOut),
         Err(_) => CallError::Unknown(UnknownOutcome::TimedOut),
     }
@@ -512,8 +516,14 @@ struct Received {
     lost: Option<io::ErrorKind>,
 }
 
-/// The thread of a call: connects, then, unless the caller has given up,
+/// The thread of a call: connects and sets the wait of the first write,
+/// then, unless the total has run out or the caller has given up meanwhile,
 /// exchanges `line` for everything the server sends.
+///
+/// Nothing is written until then: a total run out, before or after the
+/// setting (which may itself take time, on a bridge say), is
+/// [`NotSent::TimedOut`], a wait the stream refuses [`NotSent::Setup`].
+/// Only then does the phase turn to writing.
 fn run<C: Connector>(
     connector: &C,
     phase: &AtomicU8,
@@ -524,36 +534,24 @@ fn run<C: Connector>(
     let mut stream = connector
         .connect()
         .map_err(|err| NotSent::Connect(err.kind()))?;
+    let first = wait(deadline, Some(idle)).map_err(|_| NotSent::TimedOut)?;
+    stream
+        .set_write_wait(first)
+        .map_err(|err| NotSent::Setup(err.kind()))?;
+    wait(deadline, None).map_err(|_| NotSent::TimedOut)?;
     if phase
-        .compare_exchange(CONNECTING, WRITING, Ordering::AcqRel, Ordering::Acquire)
+        .compare_exchange(UNSENT, WRITING, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         // The caller has given up: the stream is dropped unwritten.
         return Err(NotSent::TimedOut.into());
     }
-    exchange(&mut stream, line.as_bytes(), deadline, idle)
+    sent(&mut stream, line.as_bytes(), deadline, idle).map_err(CallError::Unknown)
 }
 
 /// Writes `line`, ends the write half, then reads until the end of the
-/// stream, or one byte past [`MAX_REPLY_BYTES`] and no further.
-///
-/// Nothing is written before the wait of the first write is set: a total
-/// already run out is [`NotSent::TimedOut`], a wait the stream refuses
-/// [`NotSent::Setup`]. Everything after is [`sent`]'s.
-fn exchange<S: HalfClose>(
-    stream: &mut S,
-    line: &[u8],
-    deadline: Option<Instant>,
-    idle: Duration,
-) -> Result<Received, CallError> {
-    let first = wait(deadline, Some(idle)).map_err(|_| NotSent::TimedOut)?;
-    stream
-        .set_write_wait(first)
-        .map_err(|err| NotSent::Setup(err.kind()))?;
-    sent(stream, line, deadline, idle).map_err(CallError::Unknown)
-}
-
-/// The exchange once the wait of the first write is set ([`exchange`]).
+/// stream, or one byte past [`MAX_REPLY_BYTES`] and no further; the wait of
+/// the first write is set ([`run`]).
 ///
 /// A write or an end of the write half that fails other than by a timeout
 /// does not stop the read (the server may have answered before reading the
@@ -606,9 +604,10 @@ const WRITE_CHUNK: usize = 4096;
 
 /// Writes `line` and flushes, one write of at most [`WRITE_CHUNK`] bytes at
 /// a time, the wait of the first write already set: before each later
-/// write, and before the flush, what is left of the total is checked and
-/// the wait set again, so that nothing is sent once the total has run out
-/// and no write blocks past it. A write that takes nothing is a lost
+/// write, and before the flush, the wait is set again to what is left of
+/// the total (at most the idle timeout), and the total checked once more
+/// after the setting returns (it may take time), so that nothing is sent
+/// once the total has run out and no write blocks past it. A write that takes nothing is a lost
 /// connection ([`io::ErrorKind::WriteZero`]). The kind of a failure other
 /// than a timeout is returned, and the writing stops (see [`note`]).
 fn write_line<S: HalfClose>(
@@ -626,11 +625,13 @@ fn write_line<S: HalfClose>(
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
             Err(err) => return note(Err(err), None),
         }
-        let next = wait(deadline, Some(idle))?;
+        stream
+            .set_write_wait(wait(deadline, Some(idle))?)
+            .map_err(failed)?;
+        wait(deadline, None)?;
         if rest.is_empty() {
             return note(stream.flush(), None);
         }
-        stream.set_write_wait(next).map_err(failed)?;
     }
 }
 
