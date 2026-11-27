@@ -6,12 +6,12 @@
 [![TypeScript tests](https://github.com/skyoauth/skyoauth/raw/badges/main/typescript-tests.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
 [![TypeScript coverage](https://github.com/skyoauth/skyoauth/raw/badges/main/typescript-coverage.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
 
-| Path                  | Description                                          |
-| --------------------- | ---------------------------------------------------- |
-| `service/`            | Rust service (`skyoauth-service`, axum + tokio)      |
-| `service/migrations/` | Versioned PostgreSQL migrations (sqlx, embedded)     |
-| `operator/`           | Workstation operator library (`skyoauth-operator`)   |
-| `clients/typescript`  | TypeScript client library (`@skyoauth/client`)       |
+| Path                  | Description                                                        |
+| --------------------- | ------------------------------------------------------------------ |
+| `service/`            | Rust service (`skyoauth-service`, axum + tokio)                    |
+| `service/migrations/` | Versioned PostgreSQL migrations (sqlx, embedded)                   |
+| `operator/`           | Workstation operator library and offline CLI (`skyoauth-operator`) |
+| `clients/typescript`  | TypeScript client library (`@skyoauth/client`)                     |
 
 ## Service
 
@@ -120,6 +120,19 @@ needs each privilege its tests need (PostgreSQL 15 or later):
 | `CREATEROLE`                                                | the tests that create login roles: in `service/tests`, the search-path tests among them; in the `pg` scenarios, A24 (`a24_neg_store_failure_never_consumes`) and the harness's teardown test |
 | `GRANT SET ON PARAMETER session_replication_role TO <role>` | the replica-role tests in `service/tests` (`migrations.rs` and the `schema_*.rs` files), which `SET session_replication_role` and fail with SQLSTATE 42501 without it; the `pg` scenarios do not need it |
 | `GRANT pg_signal_backend TO <role>`                         | the `pg` scenarios: each drops its database with `DROP DATABASE … WITH (FORCE)`, which may terminate only backends of roles whose privileges the role has, unless it is in `pg_signal_backend`; a backend of another role still connected (an autovacuum worker, or a session of a test's login role) otherwise makes the drop fail with SQLSTATE 42501, which the harness retries for 5 seconds before it fails the test |
+
+## Operator
+
+`skyoauth-operator` is the workstation library and the offline command line
+of the same name, which checks a recovery challenge and its signed response
+without a network, a socket or a private key. The commands, the artifact
+formats and the exit codes are in
+[the operator CLI proposal](docs/proposals/operator-cli-artifacts.md).
+
+```bash
+cargo test -p skyoauth-operator --all-features
+cargo run -p skyoauth-operator -- --help
+```
 
 ## TypeScript client
 

@@ -31,13 +31,6 @@
 //!   "Plan splits"), so the wire format below is its contract.
 //! - **No HTTP and no TLS.** One JSON line each way over the socket; the
 //!   peer is authenticated by its UID alone (see "Security").
-//! - **The one key form per algorithm.** The transport derives the
-//!   operator's `public_identity` from the DER key it is given with
-//!   [`canonical_public_identity`](crate::identity::canonical_public_identity),
-//!   never from a client-supplied identity string, but the rule that S3, S5
-//!   and S7 accept one `SubjectPublicKeyInfo` form per algorithm
-//!   ([`crate::identity`], "A hard requirement on the callers") is not
-//!   enforced yet; it must land before the transport is served.
 //! - **No provider transition.** M1b's recovery-signed switch and rollback
 //!   (OQ-ADR012-4) are not operations here; nor is any WIF, audience or
 //!   token operation (T13.5).
@@ -247,8 +240,12 @@
 //!   deployment operator's tooling does, and bootstrap checks it, or its
 //!   equality with an adopted policy row).
 //! - `credential_spki` is the DER `SubjectPublicKeyInfo` of the operator's
-//!   mTLS key; the transport derives `public_identity` from it (see "Not
-//!   done here").
+//!   mTLS key; the transport derives `public_identity` from it with
+//!   [`canonical_public_identity`](crate::identity::canonical_public_identity),
+//!   never from a client-supplied identity string, so it accepts only a
+//!   valid Ed25519 or ECDSA P-256 key in its one `SubjectPublicKeyInfo`
+//!   form ([`crate::identity`], "One form per accepted algorithm" and "Key
+//!   validity").
 //! - `issue_challenge` builds the closed eight-member plan: the instance
 //!   and the key epoch from the recovery state read in the same
 //!   transaction (the issue reads it again `FOR SHARE` and refuses a plan
@@ -425,7 +422,7 @@
 //! | ----- | ---- |
 //! | the peer's UID is neither the service UID nor 0, or has no credentials | `forbidden` |
 //! | a malformed or oversized request (see "Protocol") | `invalid_request` |
-//! | a value the transport's checks refuse: not lowercase hexadecimal, an `instance_id` that is not a lowercase UUIDv7, a key that is not a canonical Ed25519 point of large order, a DER that is not one `SubjectPublicKeyInfo`, a bad `trust_anchor_ref`, an operation ID with a NUL | `invalid_request` |
+//! | a value the transport's checks refuse: not lowercase hexadecimal, an `instance_id` that is not a lowercase UUIDv7, a key that is not a canonical Ed25519 point of large order, a DER that is not one `SubjectPublicKeyInfo` of a valid Ed25519 or P-256 key in its accepted form, a bad `trust_anchor_ref`, an operation ID with a NUL | `invalid_request` |
 //! | idle timeout, deadline before the transaction began, no end of stream after the line | (closed, no response, nothing written) |
 //! | the transaction not ended within the transaction timeout, or cut at shutdown (the database connection is discarded; nothing written unless the commit was sent, whose outcome is then unknown) | (closed, no response) |
 //! | an issue whose replacement key a credential (live or revoked) already has | `conflict` |

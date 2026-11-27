@@ -314,7 +314,7 @@
 pub(crate) mod base64url;
 mod key;
 mod overlap;
-mod point;
+pub(crate) mod point;
 mod projection;
 mod set;
 mod thumbprint;

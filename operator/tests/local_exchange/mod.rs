@@ -47,7 +47,7 @@
 use std::{
     io::{self, Read as _, Write as _},
     os::unix::{
-        fs::{MetadataExt as _, PermissionsExt as _},
+        fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _},
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -84,8 +84,8 @@ const PATIENT: Timeouts = Timeouts {
     idle: TEST_WAIT,
 };
 
-/// A fresh directory under the system's temporary directory, removed when
-/// dropped.
+/// A fresh directory under the system's temporary directory, created with
+/// mode 0700, removed when dropped.
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -96,8 +96,10 @@ impl TempDir {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir(&path).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
         Self(path)
     }
 

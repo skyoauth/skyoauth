@@ -36,12 +36,15 @@ impl AdminPeer {
     /// The peer identity of a verified client certificate's
     /// `SubjectPublicKeyInfo` (DER): the acceptor's constructor.
     ///
+    /// Refuses, as [`canonical_public_identity`] does, every key but a valid
+    /// Ed25519 or ECDSA P-256 key in its one accepted `SubjectPublicKeyInfo`
+    /// form ([`crate::identity`], "One form per accepted algorithm" and "Key
+    /// validity"), so a key has one peer identity and a small-order key
+    /// none.
+    ///
     /// Not yet called: the rustls acceptor is a later slice (S6). Before it
-    /// may call this, it must enforce the one `SubjectPublicKeyInfo` form
-    /// per accepted algorithm ([`crate::identity`], "A hard requirement on
-    /// the callers"; the algorithm set awaits the user's decision) and the
-    /// chain anchor's equality with the credential's `trust_anchor_ref`
-    /// (D5).
+    /// may call this, it must enforce the chain anchor's equality with the
+    /// credential's `trust_anchor_ref` (D5).
     #[cfg_attr(
         not(test),
         expect(
@@ -134,6 +137,15 @@ mod tests {
         assert!(matches!(
             AdminPeer::from_peer_spki(ED25519_IDENTITY.as_bytes()),
             Err(IdentityError::NotDer | IdentityError::NotSpki | IdentityError::Truncated)
+        ));
+        // The same key with NULL parameters: not the one Ed25519 form.
+        let mut null_parameters = vec![
+            0x30, 0x2c, 0x30, 0x07, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x05, 0x00,
+        ];
+        null_parameters.extend_from_slice(&ED25519_SPKI[9..]);
+        assert!(matches!(
+            AdminPeer::from_peer_spki(&null_parameters),
+            Err(IdentityError::UnsupportedKey)
         ));
         assert_eq!(format!("{peer:?}"), "AdminPeer { .. }");
     }

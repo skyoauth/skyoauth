@@ -3,9 +3,10 @@
 //! one and of every error; the traits `SoftwareSigner` and `SigningRequest`
 //! must not have; and source checks that every top-level module is
 //! classified, that nothing under `operator/src` but the deployment-local
-//! client writes a file or prints, that the signer's key and request have
-//! no way out, and that the deployment-local client, once it exists,
-//! never names the signer.
+//! client and the binary writes a file or prints, that the signer's key and
+//! request have no way out, that the deployment-local client, once it
+//! exists, never names the signer, and that the binary neither signs nor
+//! writes a file.
 
 use std::{
     collections::BTreeSet,
@@ -352,6 +353,17 @@ fn is_local(path: &Path) -> bool {
     path == src.join("local.rs") || path.starts_with(src.join("local"))
 }
 
+/// The directory of the package's binaries, `src/bin/`.
+const BIN_DIR: &str = "bin";
+
+/// The one binary, `skyoauth-operator`: a directory under [`BIN_DIR`].
+const BINARY: &str = "skyoauth-operator";
+
+/// Whether `path` is a source of a binary: a file under `src/bin/`.
+fn is_bin(path: &Path) -> bool {
+    path.starts_with(source_dir().join(BIN_DIR))
+}
+
 /// The code of `text`: every line but comment lines.
 fn code_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
     text.lines()
@@ -399,10 +411,11 @@ fn declared_modules() -> BTreeSet<String> {
 
 /// Every top-level module is classified: each is a format module or the
 /// local client, every format module is declared, and every file or
-/// directory in `src/` is `lib.rs` or names a declared module (a
+/// directory in `src/` is `lib.rs`, `bin/` or names a declared module (a
 /// `local.rs` or `local/` is checked as the local client whether declared
-/// or not). So a new module, or the local client in either layout, cannot
-/// escape both source checks below.
+/// or not). `bin/` holds the one binary's directory and nothing else. So a
+/// new module, the local client in either layout, or a new binary, cannot
+/// escape the source checks below.
 #[test]
 fn every_top_level_module_is_classified() {
     let declared = declared_modules();
@@ -424,6 +437,18 @@ fn every_top_level_module_is_classified() {
         if name == "lib.rs" {
             continue;
         }
+        if name == BIN_DIR {
+            let binaries: Vec<String> = std::fs::read_dir(&path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            assert_eq!(binaries, [BINARY], "src/bin/ holds the one binary");
+            assert!(
+                path.join(BINARY).is_dir(),
+                "src/bin/{BINARY} is a directory"
+            );
+            continue;
+        }
         let module = name.strip_suffix(".rs").unwrap_or(&name);
         assert!(
             declared.contains(module),
@@ -434,18 +459,20 @@ fn every_top_level_module_is_classified() {
 
 /// Nothing under `operator/src` but the deployment-local client
 /// (`src/local.rs` or `src/local/`, which talks to a socket and is held to
-/// its own check below) touches a file, a writer, the console, the process
-/// or its environment, or the secret scalar: no `std::fs`, `File`,
-/// `OpenOptions`, `std::io`, `print!`, `println!`, `eprint`, `dbg!`,
-/// `std::process`, `std::env` or `to_scalar`, and every `write` is a
-/// formatter's `f.write_str(`. So no function of the formats or the signer
-/// writes or prints a private key anywhere.
+/// its own check below) and the binary (`src/bin/`, which reads files and
+/// prints, held to [`the_binary_neither_signs_nor_writes_a_file`])
+/// touches a file, a writer, the console, the process or its environment,
+/// or the secret scalar: no `std::fs`, `File`, `OpenOptions`, `std::io`,
+/// `print!`, `println!`, `eprint`, `dbg!`, `std::process`, `std::env` or
+/// `to_scalar`, and every `write` is a formatter's `f.write_str(`. So no
+/// function of the formats or the signer writes or prints a private key
+/// anywhere.
 #[test]
 fn no_source_writes_a_file() {
     let src = source_dir();
     let sources: Vec<(PathBuf, String)> = sources(&src)
         .into_iter()
-        .filter(|(path, _)| !is_local(path))
+        .filter(|(path, _)| !is_local(path) && !is_bin(path))
         .collect();
     for read in [
         "lib.rs",
@@ -510,6 +537,70 @@ fn the_local_client_never_names_the_signer() {
             "to_scalar",
         ] {
             assert!(!text.contains(name), "{name} in {}", path.display());
+        }
+    }
+}
+
+/// The binary (`src/bin/`) checks artifacts only: no source there names
+/// the signer, its request, a signing key, a seed or the secret scalar;
+/// none writes, creates or removes a file, changes a permission or reads
+/// the environment (its only input from the process is its arguments);
+/// none uses `unsafe`, which its `main.rs` forbids; and none prints with a
+/// macro that panics when the output is closed (`print!`, `println!`,
+/// `eprint!`, `eprintln!`, `dbg!`). The check fails if it does not read
+/// the binary's `main.rs`.
+#[test]
+fn the_binary_neither_signs_nor_writes_a_file() {
+    let sources: Vec<(PathBuf, String)> = sources(&source_dir())
+        .into_iter()
+        .filter(|(path, _)| is_bin(path))
+        .collect();
+    assert!(
+        sources
+            .iter()
+            .any(|(path, _)| path.ends_with(Path::new(BINARY).join("main.rs"))),
+        "the binary's main.rs is read"
+    );
+    assert!(
+        sources.iter().any(|(path, text)| path.ends_with("main.rs")
+            && text.lines().any(|line| line == "#![forbid(unsafe_code)]")),
+        "the binary forbids unsafe code"
+    );
+    for (path, text) in &sources {
+        for name in [
+            "SigningKey",
+            "SoftwareSigner",
+            "RecoverySigner",
+            "SigningRequest",
+            "signing_key",
+            "seed",
+            "sign_challenge",
+            "to_scalar",
+        ] {
+            assert!(!text.contains(name), "{name} in {}", path.display());
+        }
+        for (number, line) in code_lines(text) {
+            let place = format!("{}:{number}: {line}", path.display());
+            for token in [
+                "fs::write",
+                "File::create",
+                "OpenOptions",
+                "create_dir",
+                "remove_",
+                "rename",
+                "set_permissions",
+                "env::var",
+                "env::set",
+                "env::current",
+                "unsafe ",
+                "unsafe{",
+                "print!",
+                "println!",
+                "eprint",
+                "dbg!",
+            ] {
+                assert!(!line.contains(token), "{token} at {place}");
+            }
         }
     }
 }
