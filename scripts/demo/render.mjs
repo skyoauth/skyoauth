@@ -31,7 +31,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -168,8 +168,17 @@ export function publishFiles({ outDir, name, bytes, records }) {
 
 // DEMO_KEEP_RAW=<dir>: copies the raw recording directory of a failed
 // render into `dest`. Never throws, so a failed copy cannot replace the
-// render's own error: returns a line saying what happened.
+// render's own error: returns a line saying what happened. A render that
+// failed before the browser wrote a recording keeps nothing (and does not
+// create `dest`).
 export function keepRawRecording(rawDir, dest) {
+  let written = [];
+  try {
+    written = readdirSync(rawDir);
+  } catch {
+    // An unreadable raw directory holds nothing to keep.
+  }
+  if (written.length === 0) return 'DEMO_KEEP_RAW: no raw recording was written, nothing kept';
   try {
     mkdirSync(dest, { recursive: true });
     cpSync(rawDir, dest, { recursive: true });

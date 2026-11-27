@@ -269,6 +269,24 @@ describe('Authorization fields', () => {
     }
   });
 
+  it('apply to JSON-escaped keys and values too ({\\"Authorization\\": \\"Bearer x\\"})', () => {
+    // Values the general Bearer rule alone would let through (no digit,
+    // shorter than 16): only the field rule refuses them.
+    for (const text of [
+      '{\\"Authorization\\": \\"Bearer abc\\"}',
+      '{\\"proxy-authorization\\":\\"Bearer someword\\"}',
+      'body: "{\\"authorization\\": \\"Bearer <redacted>x\\"}"',
+      '{\\"Authorization\\": \\"Bearer \\"}',
+    ]) {
+      assert.equal(hasBearerCredential(text), true, text);
+      rejects(rec(2, 'output', text), /^Bearer credential in "text"$/);
+    }
+    for (const text of ['{\\"Authorization\\": \\"Bearer <redacted>\\"}', 'body: "{\\"proxy-authorization\\":\\"Bearer <redacted>\\"}"']) {
+      assert.equal(hasBearerCredential(text), false, text);
+      accepts(rec(2, 'output', text));
+    }
+  });
+
   it('hold a single record to exactly <redacted>, and accept only a joined form that starts with it', () => {
     for (const text of ['Authorization: Bearer <redacted>abc123', 'Authorization: Bearer <redacted>x', 'Proxy-Authorization: Bearer <redacted>)', '{"authorization": "Bearer <redacted>tok"}']) {
       assert.equal(hasBearerCredential(text), true, text);
@@ -589,6 +607,29 @@ describe('diagnostics never echo the input', () => {
     const printed = r.stdout + r.stderr;
     assert.ok(printed.includes(`${path}:1:`), printed);
     for (const needle of NEEDLES) assert.ok(!printed.includes(needle), `printed ${needle}:\n${printed}`);
+  });
+
+  it('--secret-file key names are not echoed: an unusual one is shown by its position', () => {
+    const SECRET_KEY = 'dummy-key-name-secret-55';
+    const seed = 'a1b2c3d4e5f6a7b8c9d0';
+    const named = join(TMP, 'secret-key-names.json');
+    writeFileSync(named, JSON.stringify({ keys: [{ plain_name: 1, [SECRET_KEY]: { seed } }] }));
+    assert.deepEqual([...secretsFromFile(named).keys()], ['secret-key-names.json keys[0].<key 2>.seed']);
+    const leak = join(TMP, 'key-name-leak.jsonl');
+    writeFileSync(leak, `${rec(0, 'output', `seed ${seed}`)}\n`);
+    const r = spawnSync(process.execPath, [SCRIPT, 'check', '--secret-file', named, leak], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /key-name-leak\.jsonl:1: the value of secret-key-names\.json keys\[0\]\.<key 2>\.seed appears in the record/);
+    const short = join(TMP, 'secret-key-names-short.json');
+    writeFileSync(short, JSON.stringify({ [SECRET_KEY]: { seed: 'abc' } }));
+    const s2 = spawnSync(process.execPath, [SCRIPT, 'check', '--secret-file', short, SAMPLE], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+    assert.equal(s2.status, 2);
+    assert.match(s2.stderr, /<key 1>\.seed is shorter than 8 characters/);
+    const render = spawnSync(process.execPath, [join(HERE, 'render.mjs'), leak, '--out', join(TMP, 'key-name-out'), '--secret-file', named], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+    assert.equal(render.status, 1);
+    for (const printed of [r.stdout + r.stderr, s2.stdout + s2.stderr, render.stdout + render.stderr]) {
+      for (const needle of [SECRET_KEY, SECRET_KEY.slice(0, 12), seed]) assert.ok(!printed.includes(needle), `printed ${needle}:\n${printed}`);
+    }
   });
 
   it('a --secret-file that is not JSON is not echoed', () => {

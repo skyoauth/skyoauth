@@ -127,8 +127,9 @@ export const BEARER_AUTH_PARAMS = ['realm', 'scope', 'error', 'error_description
 // A Bearer credential, either of:
 //   - an Authorization or Proxy-Authorization field (any case, as a header
 //     `Authorization: Bearer x` or a JSON/YAML key `"authorization": "Bearer
-//     x"`) whose Bearer value is not exactly <redacted> (the value ends at a
-//     blank, quote, comma or semicolon), an empty value included: no
+//     x"`, also JSON-escaped `{\"authorization\": \"Bearer x\"}`) whose
+//     Bearer value is not exactly <redacted> (the value ends at a blank,
+//     quote, backslash, comma or semicolon), an empty value included: no
 //     heuristic applies there. In a joined form (`joined`) the value need
 //     only start with <redacted>, since the join may glue the next line or
 //     record to it; each record alone was already held to the exact value;
@@ -143,7 +144,7 @@ export const BEARER_AUTH_PARAMS = ['realm', 'scope', 'error', 'error_description
 //     JSON-escaped, \") or a token character. Any other name=... is a padded token
 //     (`Bearer dGhpc2lz=`, `Bearer a1b2=c3`).
 export function hasBearerCredential(text, { joined = false } = {}) {
-  for (const m of text.matchAll(/\b(?:proxy-)?authorization["']?[ \t]*[:=][ \t]*["']?bearer\b[ \t]*([^\s"',;]*)/gi)) {
+  for (const m of text.matchAll(/\b(?:proxy-)?authorization\\?["']?[ \t]*[:=][ \t]*\\?["']?bearer\b[ \t]*([^\s"',;\\]*)/gi)) {
     if (joined ? !m[1].startsWith(REDACTED) : m[1] !== REDACTED) return true;
   }
   for (const m of text.matchAll(/\bbearer[ \t]+([A-Za-z0-9._~+/-]+)(=*)/gi)) {
@@ -524,11 +525,15 @@ export function secretsFromFile(path) {
     throw new UsageError(`--secret-file ${path}: not JSON${jsonErrorPosition(content)}`);
   }
   const secrets = new Map();
+  // A key name is part of a label (messages, rule names) only when it is
+  // plain ([A-Za-z0-9_]); any other name could hold anything, so it is
+  // shown by its 1-based position in its object instead: <key 3>.
+  const segment = (k, i) => (/^[A-Za-z0-9_]+$/.test(k) ? k : `<key ${i + 1}>`);
   const walk = (node, at) => {
     if (Array.isArray(node)) node.forEach((x, i) => walk(x, `${at}[${i}]`));
     else if (node !== null && typeof node === 'object') {
-      for (const [k, v] of Object.entries(node)) {
-        const here = at ? `${at}.${k}` : k;
+      for (const [i, [k, v]] of Object.entries(node).entries()) {
+        const here = at ? `${at}.${segment(k, i)}` : segment(k, i);
         if (SECRET_KEYS.has(k) && typeof v === 'string') {
           if (v.length < MIN_SECRET_LENGTH) throw new UsageError(`--secret-file ${path}: ${here} is shorter than ${MIN_SECRET_LENGTH} characters`);
           secrets.set(`${basename(path)} ${here}`, v);

@@ -9,7 +9,8 @@ an invented sample transcript, the `demo-transcripts` job of `ci.yml` (in
 run artifacts, and the Dependabot entry for its one npm dependency,
 `playwright`. Not implemented: the journey runner and every journey of
 section 1, the golden transcripts (`tests/demo/golden/` is empty), the
-redaction at the source (section 2, item 2), chapter markers, and the
+redaction at the source (section 2, item 2), chapter markers and one
+video per milestone (designed in section 6, for the lead's review), and the
 release assets of section 5. The rest of this text is the plan as
 proposed. It answers a request
 of the user (2026-11-27): "a demo walk-through video for the CUJs (no need to
@@ -320,6 +321,180 @@ The user asked (2026-11-27) that the videos be part of the release artifacts
   recordings of a failed render, `demo-raw-recordings-N`, 3 days) and is not in
   `CI passed`; the `demo-transcripts` job of `ci.yml` checks the committed
   transcripts and is.
+
+## 6. Chapters and one video per milestone (design, not built)
+
+**Lead pick** (the lead's design; written down here for the lead's review
+before any code). Not built: the record type, the manifest, the join, the
+chapter tracks and the merged checksums below are a specification for the
+implementation PRs at the end of this section. The checks of
+`scripts/demo/transcript.mjs` stay as they are; this section adds to them.
+
+**6.1 The `chapter` record.** A fifth record type:
+`{"step":N,"type":"chapter","text":S}`, in the same canonical form as the
+others. Rules, on top of every existing rule:
+
+- `text` is one line of 1 to 80 code points and starts with the journey id
+  and a colon (`M1a-2: Recover the operator`); no `allow` field;
+- `check` accepts at most one chapter record per file, and only as step 0;
+  `check-milestone` (6.3) requires it in every journey file. The sample holds
+  none (a test pins that);
+- it is transcript text: the character, timestamp and secret rules, and the
+  `--secret-file` and `--secret-env` values, apply to it as to a caption. Its
+  text is the only source of a chapter title (the WebVTT chapter cue and the
+  mp4 chapter both come from the checked record, never from the manifest or
+  a file name).
+
+The player shows a chapter as a title card: it clears the terminal, shows the
+title, and clears the caption bar, for `CHAPTER_MS` (a new `timing.js`
+constant, 2000 ms). It is not a caption, so it is not in the captions VTT.
+
+**6.2 Layout and manifest.**
+
+```text
+tests/demo/golden/<milestone>/milestone.json   order of the journeys (committed by hand)
+tests/demo/golden/<milestone>/<journey>.jsonl  one golden transcript per journey (written by the runner)
+```
+
+`<milestone>` is the lower-case milestone id (`m1a`), `<journey>` the
+lower-case journey id (`m1a-2`). `milestone.json` holds exactly
+`{"milestone":"M1a","journeys":["M1a-1","M1a-2",...]}`: no other key, each
+id once, matching `^M[1-5][ab]?-[1-9][0-9]*$`, prefixed by the milestone id.
+The array order is the video's order. The manifest is a reviewed file owned
+by whoever owns the journey list of section 1 (the lead), not by the runner.
+Every listed id has its file in the same directory, and every `.jsonl` there
+is listed: a missing or an unlisted file is an error.
+
+**6.3 Join and renumbering.** The **joined stream** of a milestone is its
+journey files in manifest order, each record re-serialized canonically with
+`step` = (records in the earlier journeys) + (its step in its file): a
+monotonic step from 0 with no gap, a chapter record at the first step of each
+journey. It is derived, never committed. `transcript.mjs` gets a
+`check-milestone <dir>...` command that checks:
+
+1. the manifest (6.2);
+2. each journey file alone, with every rule (as `check` does today);
+3. the joined stream through `validateTranscript`, so the pair windows cross
+   journey boundaries (last record of one journey with the chapter of the
+   next, and that chapter with the next journey's first record). Because a
+   chapter breaks the runs of `output` and `note` records, the joined stream
+   is also checked once with its chapter records removed, so a value split
+   over the last record of one journey and the first of the next is found.
+
+An error of the joined stream is reported at a file and line, never at a
+joined line: `m1a-2.jsonl:1: JWT-shaped string across the records on
+m1a-1.jsonl:14 - m1a-2.jsonl:1 (texts joined)`. An error already reported
+for a file alone is not repeated. Allow markers carry over unchanged.
+
+**6.4 Timing.** The milestone video plays the joined stream, so every time
+comes from `timing.buildTimeline(joined records)`. The typing delays depend
+on the step index, so a journey types differently when it is played inside
+its milestone than when it is played alone; only the joined form is ever
+rendered. Chapter *k* starts at the `startMs` of its chapter record and ends
+where chapter *k+1* starts; the last ends at `totalMs`. The chapters are
+written as a WebVTT chapters file (`kind="chapters"`), one cue per journey,
+contiguous and covering 0 to `totalMs`:
+
+```text
+WEBVTT
+
+chapter-1
+00:00:00.000 --> 00:01:12.340
+M1a-1: Bootstrap the operator
+```
+
+Cue ids are `chapter-<n>` (1-based, manifest order). The text is escaped
+with `escapeCueText`, as captions are. The captions VTT keeps its format, with
+`step-<joined step>` ids.
+
+**6.5 Outputs.** `render.mjs --milestone <dir>... --out <dir>` writes, per
+milestone `<m>`: `<m>.mp4`, `<m>.vtt` (captions), `<m>.chapters.vtt`,
+`<m>.transcript.jsonl` (the joined stream as rendered) and
+`<m>.milestone.json` (a byte copy of the manifest). The mp4 carries the same
+chapters as mp4 metadata, from an ffmpeg `FFMETADATA1` file of `[CHAPTER]`
+blocks (`TIMEBASE=1/1000`, `START`, `END`, `title`) mapped with
+`-map_chapters`. Checked locally with ffmpeg 6.1.1 on a test clip:
+`ffprobe -show_chapters` lists the titles and times, `moov` stays before
+`mdat`, and two encodes with the existing bitexact flags are byte-identical.
+The mp4 gains a second stream (a QuickTime chapter text track) beside a Nero
+`chpl` box, so the e2e test's "one stream" check becomes "one video stream,
+no audio, one chapter track".
+
+One `SHA256SUMS` lists every file of the output directory, for all
+milestones rendered into it, merged and never overwritten. Before rendering a
+milestone, the script reads `SHA256SUMS` (strict format `<64 hex>  <name>`,
+sorted by name; any other content is an error), and fails, writing nothing,
+when the directory is inconsistent (a listed file that is missing, a file that
+is not listed) or when any of its output names already exists. After
+rendering, it writes the new files, then rewrites `SHA256SUMS` with the union,
+sorted (temporary file, then rename). Re-rendering a milestone into a
+directory that has it is therefore an error, never a silent replacement. The
+single-transcript mode (`render.mjs <file>`) moves to the same merge.
+
+**6.6 Determinism.** Unchanged rule: the transcripts are compared, never the
+mp4. Compared byte for byte between two runs: each journey file (the harness
+against its golden), and the derived joined stream, captions VTT, chapters
+VTT and their `SHA256SUMS` lines. The mp4's chapters (`ffprobe -show_chapters`)
+must equal the chapters VTT to the millisecond.
+
+**6.7 CI.**
+
+- `demo-transcripts` (`ci.yml`, in `CI passed`): the golden step runs `check`
+  over every `.jsonl` under `tests/demo` (each file alone, as today) and
+  `check-milestone` over every `tests/demo/golden/*/` directory, both with the
+  test keys. A `.jsonl` under `tests/demo/golden/` that is not in a milestone
+  directory with a manifest is an error.
+- `demo.yml` (not in `CI passed`): renders the sample and every milestone
+  directory into `$RUNNER_TEMP/demo`, then `sha256sum --strict -c`. One
+  `demo-videos-N` artifact holds all of them, flat, with the one
+  `SHA256SUMS`; retention as today (7 days on a pull request, 90 otherwise).
+  `timeout-minutes` grows with the milestones (real-time recording, about
+  five minutes each). Raw recordings as today.
+
+**6.8 Failure modes and the tests of the implementation PRs.** Each with a
+test, and a mutant the test kills:
+
+- the record: a chapter that is not step 0, a second chapter, a chapter in
+  the sample, a multi-line or over-long or id-less title, `allow` on a
+  chapter, a secret, timestamp or `--secret-file` seed in a title;
+- the manifest: an unknown key, a duplicate or malformed id, an id of another
+  milestone, a listed file that is missing, an unlisted `.jsonl`;
+- the join: renumbering (steps 0..n-1 across journeys), a value split over a
+  journey boundary (with and without the chapter between), errors mapped back
+  to file and line, no repeated error;
+- timing: the chapter cues equal the chapter records' `startMs`, contiguous,
+  ending at `totalMs`; the player's title card in the VM test (6.1);
+- outputs: the mp4 chapters equal the chapters VTT (e2e); `SHA256SUMS`
+  merges two milestones rendered one after the other, refuses a re-render, a
+  missing or unlisted file and a malformed line, and is never left half
+  written;
+- CI: the wiring test (`workflows.test.mjs`) pins the `check-milestone` step
+  and the demo.yml milestone render.
+
+**6.9 Open questions for the lead.**
+
+1. When one milestone fails to render, do the others still render and upload
+   (the step fails at the end), or does the job stop at the first failure?
+   Section 5 says a failure publishes no video for that milestone, which
+   suggests the first.
+2. Is the chapter title card (2 s) wanted, or only the markers?
+3. Is `CHAPTER_MS` fixed, or derived from the title length like a caption?
+4. Should the milestone video start with a SAMPLE-style caption naming the
+   commit, or is that a wall-clock-free caption the runner writes?
+5. M3 (browser recordings, no transcript) cannot use this join; its chapters
+   need another source (section 2, item 3).
+
+**6.10 Implementation breakdown.** Four PRs, each with its tests:
+
+1. `transcript.mjs`: the `chapter` type, the manifest, `check-milestone`, the
+   join and the error mapping.
+2. `timing.js`, `player.html`, `vtt.mjs`: `CHAPTER_MS`, the title card, the
+   chapters VTT.
+3. `render.mjs`: `--milestone`, the ffmpeg chapter metadata, the merged
+   `SHA256SUMS`, the e2e test.
+4. CI: the `ci.yml` golden step, the `demo.yml` milestone render and timeout,
+   the wiring tests, and the docs. The journeys and their golden files remain
+   separate PRs, as in section 2.
 
 ## Decisions requested
 

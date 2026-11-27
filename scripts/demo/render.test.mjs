@@ -85,6 +85,15 @@ describe('DEMO_KEEP_RAW', () => {
     assert.equal(existsSync(dest), false);
   });
 
+  it('keeps nothing, and creates nothing, when no recording was written', () => {
+    const empty = join(TMP, 'raw-empty');
+    mkdirSync(empty);
+    const dest = join(TMP, 'kept-nothing');
+    assert.equal(keepRawRecording(empty, dest), 'DEMO_KEEP_RAW: no raw recording was written, nothing kept');
+    assert.equal(keepRawRecording(join(TMP, 'raw-missing'), dest), 'DEMO_KEEP_RAW: no raw recording was written, nothing kept');
+    assert.equal(existsSync(dest), false);
+  });
+
   it('render() reports the copy and rethrows its own error', () => {
     const source = readFileSync(join(HERE, 'render.mjs'), 'utf8');
     const handler = /\} catch \(e\) \{\n([\s\S]*?)\n  \} finally \{/.exec(source.slice(source.indexOf('export async function render(')));
