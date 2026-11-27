@@ -1,10 +1,13 @@
 # Proposal: separate migrate and runtime database roles (T10.1 follow-up)
 
-Status: Draft, plan only, revised 2026-11-26 after review. Nothing here is
+Status: Ruled (the user, 2026-11-27, relayed by the lead): R3, R4a's
+refusal, R6, R7a and Q-roles as recommended, with R8; not implemented.
+Drafted as a plan, revised 2026-11-26 after review. Nothing here is
 implemented: this text changes no code, no migration, no contract and no
 test, adds no dependency and serves no endpoint. Each choice is labelled
-**lead pick** (an implementation choice open to ordinary review) or **open
-user question** (it changes a deployment contract or a ruling); the list is
+**lead pick** (an implementation choice open to ordinary review) or, where
+it was an open user question (it changes a deployment contract or a
+ruling), **ruled by the user, 2026-11-27, as recommended**; the list is
 under "Decisions requested". The review ran the proposal on a non-superuser
 migrate role on PostgreSQL 15.20, 16.15 and 17.12: R1, R7, R9, R10 and F5
 held, and its findings are applied below. This text's own claims were
@@ -97,11 +100,12 @@ with the pinned `search_path` of the guard functions".
 
 ## 2. Configuration
 
-R3, R6 and R8 depend on each other and are for the user to decide
+R3, R6 and R8 depend on each other and were for the user to decide
 together: with R8 refusing an owner and no R6 opt-out, R3's single-URL
-fallback leaves a server that refuses to start once R8 is wired.
+fallback leaves a server that refuses to start once R8 is wired. The user
+ruled them together, as recommended (2026-11-27, relayed by the lead).
 
-- **R3 (open user question): the variables.** Recommendation:
+- **R3 (ruled by the user, 2026-11-27, as recommended): the variables.** Recommendation:
   - `SKYOAUTH_DATABASE_URL` keeps its name and becomes the runtime URL: the
     server, and the later bootstrap and recovery subcommands, use it.
   - `SKYOAUTH_DATABASE_MIGRATE_URL` (new) is read by `migrate` only.
@@ -137,15 +141,15 @@ fallback leaves a server that refuses to start once R8 is wired.
   URLs. One `PGHOSTADDR` redirects both, and it decides the "remote" TLS
   judgement of both (`from_lookup` falls back to it, `config.rs:279-326`).
   Lead pick: T10.1's "documented as still read" covers the two-URL case in
-  the root README. Open user question (it amends T10.1's accepted
-  behaviour): refuse `PGHOSTADDR` when both URLs are set; recommended.
+  the root README. Ruled by the user, 2026-11-27, as recommended (it amends
+  T10.1's accepted behaviour): refuse `PGHOSTADDR` when both URLs are set.
 - **R5 (lead pick): same-role detection is by privilege, not by URL.** Two
   URLs can name different login roles that share ownership through
   membership, and one role can be reached through two URLs, so comparing
   user names proves nothing. The server checks its own privileges in the
   database at start (R8) and refuses an owner. `migrate`'s refusals of R3
   catch the same mistake from the other side.
-- **R6 (open user question): a development opt-out.** Whether the server
+- **R6 (ruled by the user, 2026-11-27, as recommended): a development opt-out.** Whether the server
   may start as the owner, for local development, behind an explicit
   variable. The config has no development mode to key it on (the server's
   one variable today is `SKYOAUTH_ADDR`, `main.rs:68`). Recommendation: no
@@ -166,12 +170,12 @@ fallback leaves a server that refuses to start once R8 is wired.
   mode, since R8's probes and every write run inside transactions. The
   server's environment should not carry the migrate URL: the server logs a
   WARN when `SKYOAUTH_DATABASE_MIGRATE_URL` is set in its environment.
-- **R7a (open user question): PostgreSQL 15 as the minimum.** R8 needs
+- **R7a (ruled by the user, 2026-11-27, as recommended): PostgreSQL 15 as the minimum.** R8 needs
   `has_parameter_privilege` (15 or later) and would refuse every default
   PostgreSQL 14 deployment, where `PUBLIC` has `CREATE` on `public`. The
   service states no minimum today (only the tests do, root
   `README.md:114`). Recommendation: 15.
-- **R8 (lead pick): the start checks.** Once, before serving, on one
+- **R8 (lead pick; ruled by the user with R3 and R6, 2026-11-27, as recommended): the start checks.** Once, before serving, on one
   runtime connection, the server runs two checks and refuses to start on
   either failure, with a message that names the step to run or the
   privilege to remove:
@@ -326,7 +330,7 @@ depend on the triggers being enabled.
   file is the one place to narrow later. `trust_keyset` and
   `admin_role_binding` would need lock-only grants without it.
 
-**Q-roles (open user question): one runtime role or an exchange role and
+**Q-roles (ruled by the user, 2026-11-27, as recommended): one runtime role or an exchange role and
 an admin role.** Recommendation: one runtime role for M1a; the exchange
 path gets its own role and pool in the M2 slice that wires it. The minimal
 matrix, the reviewer's reading checked against
@@ -527,7 +531,7 @@ migrates (R7), does not add row-level security, does not move the S8 mirror
 - **R2 (lead pick):** grants in one embedded, re-applied SQL file, under a
   transaction-level advisory lock, after an ownership check, revoking from
   `PUBLIC` too, and verified before commit.
-- **R3 (open user question):** recommended: `SKYOAUTH_DATABASE_URL` stays
+- **R3 (ruled by the user, 2026-11-27, as recommended):** recommended: `SKYOAUTH_DATABASE_URL` stays
   the runtime URL; `SKYOAUTH_DATABASE_MIGRATE_URL` is new;
   `SKYOAUTH_DATABASE_RUNTIME_ROLE` is required with the migrate URL, no
   default; fallback to `SKYOAUTH_DATABASE_URL` without grants. Decided
@@ -535,16 +539,16 @@ migrates (R7), does not add row-level security, does not move the S8 mirror
 - **R4 (lead pick):** same parsing and strict TLS per URL, errors name the
   variable, `Debug` gains `purpose`.
 - **R4a:** the two-URL case documented (lead pick); refuse `PGHOSTADDR`
-  when both URLs are set (open user question; recommended).
+  when both URLs are set (ruled by the user, 2026-11-27, as recommended).
 - **R5 (lead pick):** same-role detection by privilege in the database.
-- **R6 (open user question):** recommended: no development opt-out; if
+- **R6 (ruled by the user, 2026-11-27, as recommended):** recommended: no development opt-out; if
   one is wanted, owner only, never superuser or `CREATEROLE`, an
   explicitly insecure name and a WARN at every start.
 - **R7 (lead pick):** `migrate` as an operator step or pre-deploy job on a
   direct connection; the runtime URL may be pooled; the server warns when
   it sees the migrate URL.
-- **R7a (open user question):** PostgreSQL 15 as the minimum; recommended.
-- **R8 (lead pick):** the server refuses to start on pending or unknown
+- **R7a (ruled by the user, 2026-11-27, as recommended):** PostgreSQL 15 as the minimum; recommended.
+- **R8 (lead pick; ruled by the user with R3 and R6, 2026-11-27, as recommended):** the server refuses to start on pending or unknown
   migrations and on an over- or under-privileged role, with the escalation
   checks of section 3.
 - **R9 (lead pick):** grant the full registry surface, tests-only writers
@@ -553,7 +557,7 @@ migrates (R7), does not add row-level security, does not move the S8 mirror
   runtime role; keep `TEMP`.
 - **F5 (lead pick):** lock-only `UPDATE (grant_id)` on
   `service_grant_binding`.
-- **Q-roles (open user question):** recommended: one runtime role for
+- **Q-roles (ruled by the user, 2026-11-27, as recommended):** recommended: one runtime role for
   M1a, an exchange role and pool in the M2 slice that wires the exchange
   (matrix in section 4); it does not close F1.
 - **S5/S6/S7 split (lead picks):** see the neighbouring note.

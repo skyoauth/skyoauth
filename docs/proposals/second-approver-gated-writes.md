@@ -1217,6 +1217,10 @@ writes the versions of one keyset only (`keyset.rs:215-224`). Under
   check here prevents it while the toggle is on. Q7 (ruled by the user,
   2026-11-23) gates such grants while the toggle is on, as a follow-up;
   until it lands the residual risk is accepted.
+  Widened by the user, 2026-11-27, relayed by the lead (tasks §13): while
+  `widening_second_approver` is on, every online operator role grant and
+  credential enrollment is gated, and the gate lands before
+  `/admin/v1/operator-roles` is wired.
 - An approver sees the service checks' verdict at the request, not the
   database constraints', which run only at approve (section 3).
 
@@ -1572,6 +1576,10 @@ ruling, no longer wait on it: a change to any of them goes back to the user, whi
    instance `security_admin` (and the enrolment of an identity that
    receives one) is itself a gated kind needing a distinct existing
    `security_admin`; until then, record the residual risk as accepted.
+   Widened by the user, 2026-11-27, relayed by the lead (tasks §13): while
+   `widening_second_approver` is on, every online operator role grant and
+   credential enrollment is gated, and the gate lands before
+   `/admin/v1/operator-roles` is wired.
 
 ## Open
 

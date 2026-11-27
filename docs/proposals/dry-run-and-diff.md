@@ -170,9 +170,11 @@ Two outputs fit, and the plan proposes both, one per kind of write
   widen applies with `success` (inferred names).
 - **Audit: none in the database chain.** The write's audit event is
   appended inside the dry-run and rolled back with it, so the chain shows
-  no dry-run (refusals are not audited either). Whether a dry-run should
-  reach the external audit sink as a read-like security event is part of
-  D6, which awaits the user's decision on the sink's scope (open item 1).
+  no dry-run (refusals are not audited either). D6 is ruled by the user
+  (2026-11-27, relayed by the lead): one syslog-over-TLS forwarder that
+  reads committed events by `sequence`, so a rolled-back dry-run event never
+  reaches the sink; whether a dry-run commits a separate sink event, and of
+  which kind, stays open for the lead (open item 1).
   Either way it writes no dry-run marker into a sink event: a new member
   of the event envelope is an ADR-level change (IR-056), as D23 of the
   second-approver proposal ruled for `success_widening`.
@@ -215,8 +217,11 @@ write with a flag.
 
 ## Open items
 
-1. **External sink.** Whether a dry-run emits an event to the external
-   audit sink, and of which kind, waits for D6 (the sink's scope).
+1. **External sink.** D6 is ruled by the user (2026-11-27, relayed by the
+   lead): one syslog-over-TLS forwarder that reads committed events by
+   `sequence`, so a rolled-back dry-run event never reaches the sink;
+   whether a dry-run commits a separate sink event, and of which kind,
+   stays open for the lead.
 2. **Route shape.** Sibling routes or a query parameter, decided with the
    write routes; the contract (`docs/contracts/public-api.md`) has neither
    yet.
