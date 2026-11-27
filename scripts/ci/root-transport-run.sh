@@ -45,9 +45,10 @@
 #       LIST_STATUS is not 0; when the log or the listing is missing or
 #       empty; when a listing line is not `BINARY-ID TEST ...`; when the
 #       listing selects a test outside SELECTIONS, or no test of one of
-#       them; when it marks a test of SELECTIONS as skipped (the filterset
-#       leaves out a test it should run; such a test is not counted as
-#       left out); when the log holds no nextest summary line; when that line
+#       them, or fewer tests of one than its MIN_TESTS below; when it
+#       marks a test of SELECTIONS as skipped (the filterset leaves out a
+#       test it should run; such a test is not counted as left out); when
+#       the log holds no nextest summary line; when that line
 #       does not say that every test ran and passed (`N tests run: N
 #       passed`, N > 0, not `M/N tests run`); when its N is not the number
 #       of tests the listing selects, or its skipped count (none: 0) is not
@@ -71,6 +72,20 @@
 SELECTIONS='skyoauth-service::local_transport
 skyoauth-operator::operator local_path::
 skyoauth-scenarios::pg harness::socket_path_fixture::'
+#
+# The fewest tests each selection must list: its binary ID (one selection
+# per binary) and a number. A test removed from a selection (deleted,
+# renamed out of its prefix, or compiled out with `#[cfg(...)]`) lowers the
+# listing's count, which no other check notices unless the test is in
+# REQUIRED: nextest's counts and the listing's still agree. The script
+# checks a lower bound, so that a test added to a selection never fails the
+# step; the self-test keeps it exact: each number must equal the selection's
+# test functions in the Rust sources (`#[test]`, `#[tokio::test]`) that
+# compile on the runner (Linux on x86_64, `--all-features`), so adding a
+# test means raising its number here, and removing one, lowering it.
+MIN_TESTS='skyoauth-service::local_transport 57
+skyoauth-operator::operator 11
+skyoauth-scenarios::pg 5'
 #
 # The tests that must run and pass, each a binary ID and a test name as
 # the listing prints them: the tests whose notice says that root-only
@@ -284,7 +299,7 @@ summarize() {
     fi
     # The listing, against SELECTIONS, as `|`-separated lines (no binary
     # ID or test name holds one): `selected|N`, `excluded|N`, one
-    # `selection|BINARY-ID|PREFIX|LISTED|PASSED` each, and `bad|LINE`,
+    # `selection|BINARY-ID|PREFIX|LISTED|PASSED|MIN` each, and `bad|LINE`,
     # `outside|BINARY-ID TEST` and `skippedmatch|BINARY-ID TEST` for a
     # listing line that is not a test, for a selected test outside
     # SELECTIONS and for a test of SELECTIONS marked skipped (not counted
@@ -298,13 +313,18 @@ summarize() {
     else
         printf '%s\n' "$SELECTIONS" > "$tmp/selections"
         printf '%s\n' "$REQUIRED" > "$tmp/required"
-        awk -v selections="$tmp/selections" -v passed="$tmp/passed" -v required="$tmp/required" '
+        printf '%s\n' "$MIN_TESTS" > "$tmp/min"
+        awk -v selections="$tmp/selections" -v passed="$tmp/passed" -v required="$tmp/required" -v minimum="$tmp/min" '
             BEGIN {
                 while ((getline entry < selections) > 0) {
                     n++
                     bin[n] = entry
                     sub(/ .*/, "", bin[n])
                     prefix[n] = (index(entry, " ") ? substr(entry, index(entry, " ") + 1) : "")
+                }
+                while ((getline entry < minimum) > 0) {
+                    split(entry, field, " ")
+                    least[field[1]] = field[2]
                 }
                 while ((getline entry < passed) > 0) pass[entry] = 1
                 while ((getline entry < required) > 0) req[++nreq] = entry
@@ -332,7 +352,7 @@ summarize() {
             END {
                 print "selected|" all + 0
                 print "excluded|" excluded + 0
-                for (i = 1; i <= n; i++) print "selection|" bin[i] "|" prefix[i] "|" listed[i] + 0 "|" ok[i] + 0
+                for (i = 1; i <= n; i++) print "selection|" bin[i] "|" prefix[i] "|" listed[i] + 0 "|" ok[i] + 0 "|" least[bin[i]] + 0
                 for (i = 1; i <= nreq; i++) {
                     t = req[i]
                     if (t in skippedtest) print "required|" t "|listed as skipped"
@@ -360,15 +380,20 @@ summarize() {
         selected=$(sed -n 's/^selected|//p' "$tmp/listing")
         excluded=$(sed -n 's/^excluded|//p' "$tmp/listing")
         required_ok=$(sed -n 's/^requiredok|//p' "$tmp/listing")
-        while IFS='|' read -r kind bin prefix count ok; do
+        while IFS='|' read -r kind bin prefix count ok least; do
             [ "$kind" = selection ] || continue
             name="\`$bin\`${prefix:+ \`$prefix*\`}"
             if [ "$count" -eq 0 ]; then
                 fail "the listing selects no test of $name"
-            elif [ "$ok" -ne "$count" ]; then
-                fail "$name: $ok of its $count selected tests passed"
+            else
+                if [ "$count" -lt "$least" ]; then
+                    fail "$name: the listing selects $count tests, fewer than its minimum of $least (MIN_TESTS in scripts/ci/root-transport-run.sh): a test was removed, renamed or compiled out"
+                fi
+                if [ "$ok" -ne "$count" ]; then
+                    fail "$name: $ok of its $count selected tests passed"
+                fi
             fi
-            printf -- '- %s: %s of %s selected tests ran and passed\n' "$name" "$ok" "$count" >> "$tmp/counts"
+            printf -- '- %s: %s of %s selected tests ran and passed (MIN_TESTS: %s)\n' "$name" "$ok" "$count" "$least" >> "$tmp/counts"
             per="${per:+$per, }$bin${prefix:+ $prefix*} $ok/$count"
         done < "$tmp/listing"
         # The name and the reason are the script's own (REQUIRED, and the

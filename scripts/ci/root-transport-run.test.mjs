@@ -2,14 +2,18 @@
 // that use it in .github/workflows/ci.yml:
 //   node --test scripts/ci/root-transport-run.test.mjs
 // It needs sh, awk, sed, sort, od and tee, as the script does, and bash for
-// one check of the fixture. Every file it writes lives under one temporary
-// directory, removed afterwards; nothing runs as root or reaches a network.
+// one check of the fixture. It reads the workspace's Rust sources and
+// manifests (no cargo): every test target's files, for root-only notices
+// and branches outside the selections, and the selections' test counts.
+// Every file it writes lives under one temporary directory, removed
+// afterwards (a scratch copy of a source lives in memory only); nothing
+// runs as root or reaches a network.
 
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, normalize } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -28,20 +32,33 @@ const sh = (args, opts = {}) => spawnSync('sh', [SCRIPT, ...args], { encoding: '
 // list --message-format oneline --verbose` (nextest 0.9) for a run of the
 // three selections, shortened: the selected tests, then tests of the same
 // binaries that the filterset leaves out, which end in ` (skipped)`. The
-// selected tests are the script's REQUIRED ones and one more of each
-// selection (EXTRA, which no check requires by name).
+// selected tests are the script's REQUIRED ones, one more of each
+// selection (EXTRA, which no check requires by name), and as many made-up
+// ones (FILLER) as bring each selection to its MIN_TESTS.
 // The script's SELECTIONS, as [binary ID, test name prefix] pairs.
 const SELECTIONS = /^SELECTIONS='([^']*)'$/m
   .exec(readFileSync(SCRIPT, 'utf8'))[1]
   .split('\n')
   .map((l) => [l.split(' ')[0], l.split(' ')[1] ?? '']);
 const REQUIRED = /^REQUIRED='([^']*)'$/m.exec(readFileSync(SCRIPT, 'utf8'))[1].split('\n');
+// The script's MIN_TESTS, as [binary ID, minimum] pairs.
+const MIN_TESTS = /^MIN_TESTS='([^']*)'$/m
+  .exec(readFileSync(SCRIPT, 'utf8'))[1]
+  .split('\n')
+  .map((l) => [l.split(' ')[0], Number(l.split(' ')[1])]);
+const minOf = (bin) => MIN_TESTS.find(([b]) => b === bin)[1];
 const EXTRA = [
   'skyoauth-operator::operator local_path::a_relative_path_is_checked_as_its_absolute_form',
   'skyoauth-scenarios::pg harness::socket_path_fixture::socket_path_fixture_outcomes_are_complete',
   'skyoauth-service::local_transport a_socket_path_up_to_the_limit_works',
 ];
-const SELECTED = [...EXTRA, ...REQUIRED];
+// A test of the selection of this binary that no source has, for a fixture.
+const madeUp = (bin, name) => `${bin} ${SELECTIONS.find(([b]) => b === bin)[1]}${name}`;
+const FILLER = SELECTIONS.flatMap(([bin]) => {
+  const have = [...EXTRA, ...REQUIRED].filter((t) => t.startsWith(`${bin} `)).length;
+  return Array.from({ length: Math.max(0, minOf(bin) - have) }, (_, i) => madeUp(bin, `listed_test_${i}`));
+});
+const SELECTED = [...EXTRA, ...REQUIRED, ...FILLER];
 const N = SELECTED.length;
 // How many of these tests are in the selection of this binary.
 const inBinary = (bin, tests = SELECTED) => tests.filter((t) => t.startsWith(`${bin} `)).length;
@@ -121,9 +138,9 @@ const LT = inBinary('skyoauth-service::local_transport');
 const OP = inBinary('skyoauth-operator::operator');
 const PG = inBinary('skyoauth-scenarios::pg');
 const COUNTS =
-  `- \`skyoauth-service::local_transport\`: ${LT} of ${LT} selected tests ran and passed\n` +
-  `- \`skyoauth-operator::operator\` \`local_path::*\`: ${OP} of ${OP} selected tests ran and passed\n` +
-  `- \`skyoauth-scenarios::pg\` \`harness::socket_path_fixture::*\`: ${PG} of ${PG} selected tests ran and passed\n` +
+  `- \`skyoauth-service::local_transport\`: ${LT} of ${LT} selected tests ran and passed (MIN_TESTS: ${minOf('skyoauth-service::local_transport')})\n` +
+  `- \`skyoauth-operator::operator\` \`local_path::*\`: ${OP} of ${OP} selected tests ran and passed (MIN_TESTS: ${minOf('skyoauth-operator::operator')})\n` +
+  `- \`skyoauth-scenarios::pg\` \`harness::socket_path_fixture::*\`: ${PG} of ${PG} selected tests ran and passed (MIN_TESTS: ${minOf('skyoauth-scenarios::pg')})\n` +
   `- Required root-only tests (REQUIRED in scripts/ci/root-transport-run.sh): ${REQUIRED.length} of ${REQUIRED.length} ran and passed\n`;
 const requiredError = (t, why) => `::error::required root-only test ${t} did not run: ${why}`;
 
@@ -143,86 +160,373 @@ const KINDS = [
   ['a user namespace was denied', 'warns'],
 ];
 
-// The string literals of Rust source, each { text, line } (the text as
-// written, escapes and all), skipping comments and char literals.
-function stringLiterals(src) {
-  const out = [];
-  let line = 1;
-  const advance = (from, to) => {
-    for (let k = from; k < to; k++) if (src[k] === '\n') line++;
-    return to;
+// The Rust sources, read once each. `withSources` swaps in other texts
+// for some files (a scratch copy in memory, never the repository's) while
+// a check runs, so that the self-test can show what each check catches.
+const OVERLAY = new Map();
+const caches = [];
+const cached = (f) => {
+  const cache = new Map();
+  caches.push(cache);
+  return (file) => {
+    if (!cache.has(file)) cache.set(file, f(file));
+    return cache.get(file);
+  };
+};
+const read = cached((file) => OVERLAY.get(file) ?? readFileSync(join(REPO, file), 'utf8'));
+const exists = (file) => OVERLAY.has(file) || existsSync(join(REPO, file));
+// Each cache is by file, but for the one entry `all` (workspaceFiles),
+// which any file can change.
+function withSources(texts, check) {
+  const forget = () => {
+    for (const cache of caches) for (const key of [...Object.keys(texts), 'all']) cache.delete(key);
+  };
+  for (const [file, text] of Object.entries(texts)) OVERLAY.set(file, text);
+  forget();
+  try {
+    return check();
+  } finally {
+    OVERLAY.clear();
+    forget();
+  }
+}
+// A file's text with `from` (which must occur once) replaced by `to`.
+const edited = (file, from, to) => {
+  const text = read(file);
+  assert.equal(text.split(from).length, 2, `${file}: ${JSON.stringify(from)} does not occur once`);
+  return text.replace(from, () => to);
+};
+
+// Rust source, lexed: its string literals, each { text, line, start, end }
+// (the text as written, escapes and all; start and end the offsets of the
+// whole literal, prefix and delimiters included), and `code`, the source
+// with every comment (nested block comments too) and the contents of every
+// string and char literal blanked to spaces, newlines kept, so that offsets
+// and lines are the source's and nothing in a comment or a literal reads as
+// code. An unterminated comment or literal throws.
+function lex(src) {
+  const literals = [];
+  const code = src.split('');
+  const blank = (from, to) => {
+    for (let k = from; k < to; k++) if (code[k] !== '\n') code[k] = ' ';
+  };
+  const starts = [0];
+  for (let k = 0; k < src.length; k++) if (src[k] === '\n') starts.push(k + 1);
+  const lineAt = (offset) => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
   };
   let i = 0;
   while (i < src.length) {
     if (src.startsWith('//', i)) {
       const j = src.indexOf('\n', i);
-      i = j < 0 ? src.length : j;
+      const to = j < 0 ? src.length : j;
+      blank(i, to);
+      i = to;
       continue;
     }
     if (src.startsWith('/*', i)) {
-      i = advance(i, src.indexOf('*/', i + 2) + 2);
+      let depth = 0;
+      let j = i;
+      do {
+        if (j >= src.length) throw new Error(`unterminated block comment at line ${lineAt(i)}`);
+        if (src.startsWith('/*', j)) {
+          depth++;
+          j += 2;
+        } else if (src.startsWith('*/', j)) {
+          depth--;
+          j += 2;
+        } else j++;
+      } while (depth > 0);
+      blank(i, j);
+      i = j;
       continue;
     }
-    const raw = /^b?r(#*)"/.exec(src.slice(i, i + 16));
+    const raw = /^[bc]?r(#*)"/.exec(src.slice(i, i + 260));
     if (raw && !/\w/.test(src[i - 1] ?? '')) {
       const close = `"${raw[1]}`;
       const from = i + raw[0].length;
       const to = src.indexOf(close, from);
-      out.push({ text: src.slice(from, to), line });
-      i = advance(i, to + close.length);
+      if (to < 0) throw new Error(`unterminated raw string at line ${lineAt(i)}`);
+      literals.push({ text: src.slice(from, to), line: lineAt(i), start: i, end: to + close.length });
+      blank(from, to);
+      i = to + close.length;
       continue;
     }
     if (src[i] === '"') {
       let j = i + 1;
-      while (src[j] !== '"') j += src[j] === '\\' ? 2 : 1;
-      out.push({ text: src.slice(i + 1, j), line });
-      i = advance(i, j + 1);
+      while (src[j] !== '"') {
+        if (j >= src.length) throw new Error(`unterminated string at line ${lineAt(i)}`);
+        j += src[j] === '\\' ? 2 : 1;
+      }
+      const start = /[bc]/.test(src[i - 1] ?? '') && !/\w/.test(src[i - 2] ?? '') ? i - 1 : i;
+      literals.push({ text: src.slice(i + 1, j), line: lineAt(i), start, end: j + 1 });
+      blank(i + 1, j);
+      i = j + 1;
       continue;
     }
     if (src[i] === "'") {
+      // A char literal, or a lifetime (no closing quote).
       const ch = /^'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^\\'\n])'/.exec(src.slice(i, i + 12));
-      i += ch ? ch[0].length : 1;
+      if (ch) {
+        blank(i + 1, i + ch[0].length - 1);
+        i += ch[0].length;
+      } else i++;
       continue;
     }
-    i = advance(i, i + 1);
+    i++;
+  }
+  return { literals, code: code.join(''), lineAt, starts };
+}
+const lexed = cached((file) => lex(read(file)));
+// The string literals of Rust source, each { text, line }.
+const stringLiterals = (src) => lex(src).literals;
+
+// Whether a `cfg(...)` predicate holds in the root step's build: Linux on
+// x86_64 (unix), `--all-features`, a test build. Any other predicate
+// throws, to be classified here by hand.
+function cfgOn(expr) {
+  const tokens = expr.match(/\w+|"[^"]*"|[(),=]/g) ?? [];
+  let k = 0;
+  const parse = () => {
+    const name = tokens[k++];
+    if (['any', 'all', 'not'].includes(name)) {
+      assert.equal(tokens[k++], '(', `cfg(${expr})`);
+      const args = [];
+      while (tokens[k] !== ')') {
+        if (k >= tokens.length) throw new Error(`cfg(${expr}): not closed`);
+        args.push(parse());
+        if (tokens[k] === ',') k++;
+      }
+      k++;
+      if (name === 'not') {
+        assert.equal(args.length, 1, `cfg(${expr})`);
+        return !args[0];
+      }
+      return name === 'any' ? args.some(Boolean) : args.every(Boolean);
+    }
+    if (tokens[k] === '=') {
+      k++;
+      const value = JSON.parse(tokens[k++]);
+      if (name === 'target_os') return value === 'linux';
+      if (name === 'target_arch') return value === 'x86_64';
+      if (name === 'target_family') return value === 'unix';
+      if (name === 'feature') return true;
+      throw new Error(`cfg(${expr}): ${name} = ${JSON.stringify(value)} is not classified: add it to cfgOn`);
+    }
+    if (name === 'unix' || name === 'test') return true;
+    if (name === 'windows') return false;
+    throw new Error(`cfg(${expr}): ${name} is not classified: add it to cfgOn`);
+  };
+  const value = parse();
+  assert.equal(k, tokens.length, `cfg(${expr}): trailing tokens`);
+  return value;
+}
+
+// The calls of the macros the checks read, in a file's code: each { name,
+// line, open, close, literals, code, plainPath }, with its delimiters'
+// offsets, the string literals between them, its code (literals blanked)
+// and, when its one argument is one plain string literal, that literal's
+// text. A `name!` in a comment or a literal is no call.
+const FORMATTING = ['print', 'println', 'eprint', 'eprintln', 'format', 'format_args', 'write', 'writeln', 'panic', 'assert', 'assert_eq', 'assert_ne', 'debug_assert', 'unreachable', 'todo', 'unimplemented'];
+const BUILDING = ['concat', 'include', 'include_str', 'include_bytes', 'stringify'];
+const macroCalls = cached((file) => {
+  const src = read(file);
+  const { code, literals, lineAt } = lexed(file);
+  const out = [];
+  for (const m of code.matchAll(/\b([a-z_]+)\s*!\s*([([{])/g)) {
+    if (!FORMATTING.includes(m[1]) && !BUILDING.includes(m[1])) continue;
+    const open = m.index + m[0].length - 1;
+    let depth = 0;
+    let close = open;
+    for (; close < code.length; close++) {
+      if ('([{'.includes(code[close])) depth++;
+      else if (')]}'.includes(code[close]) && --depth === 0) break;
+    }
+    if (code[close] !== { '(': ')', '[': ']', '{': '}' }[m[2]]) throw new Error(`${file}:${lineAt(m.index)}: ${m[1]}! is not closed`);
+    const inside = literals.filter((l) => l.start > open && l.end <= close);
+    const plain = inside.length === 1 && src[inside[0].start] === '"' && code.slice(open + 1, inside[0].start).trim() === '' && code.slice(inside[0].end, close).trim() === '';
+    out.push({ name: m[1], line: lineAt(m.index), open, close, literals: inside, code: code.slice(open + 1, close), plainPath: plain ? inside[0].text : null });
+  }
+  return out;
+});
+
+// The files a crate root compiles in: { file, path, cfgs }, with the module
+// path (`a::b::`) of each and the cfg predicates its module is under,
+// following `mod NAME;`, inline `mod NAME { ... }` (closed by a `}` at its
+// indentation, as rustfmt writes it), `#[path = "..."]` and `include!` (the
+// included file is scanned as part of the file that includes it). It reads
+// the code alone (comments and literals blanked), and every `mod`, `#[path]`
+// and `include!` there must be one it followed, else it throws: a module
+// it could not follow would be a file no check reads.
+function moduleFiles(root) {
+  const out = [];
+  const walk = (file, dir, path, cfgs) => {
+    const lines = read(file).split('\n');
+    const { code } = lexed(file);
+    const codeLines = code.split('\n');
+    const inner = codeLines.flatMap((l, k) => (/^\s*#!\[cfg\(/.test(l) ? [/^\s*#!\[cfg\((.*)\)\]\s*$/.exec(lines[k])[1]] : []));
+    const own = [...cfgs, ...inner];
+    out.push({ file, path, cfgs: own });
+    const stack = [{ indent: -1, dir, path, cfgs: own }];
+    let pathAttr = null;
+    let attrCfgs = [];
+    let mods = 0;
+    let paths = 0;
+    codeLines.forEach((text, k) => {
+      const trimmed = text.trimEnd();
+      if (stack.length > 1 && trimmed === `${' '.repeat(stack.at(-1).indent)}}`) {
+        stack.pop();
+        return;
+      }
+      if (/^\s*#\[/.test(text)) {
+        const p = /^\s*#\[path = "([^"]+)"\]\s*$/.exec(lines[k]);
+        if (p) pathAttr = p[1];
+        const c = /^\s*#\[cfg\((.*)\)\]\s*$/.exec(lines[k]);
+        if (c) attrCfgs.push(c[1]);
+        return;
+      }
+      if (trimmed === '') return;
+      const m = /^(\s*)(?:pub(?:\([^)]*\))? )?mod (\w+)\s*(;|\{)$/.exec(trimmed);
+      if (m) {
+        mods++;
+        const cur = stack.at(-1);
+        const modCfgs = [...cur.cfgs, ...attrCfgs];
+        if (m[3] === '{') {
+          if (pathAttr) throw new Error(`${file}:${k + 1}: #[path] on an inline module is not followed`);
+          stack.push({ indent: m[1].length, dir: join(cur.dir, m[2]), path: `${cur.path}${m[2]}::`, cfgs: modCfgs });
+        } else {
+          if (pathAttr) paths++;
+          const child = pathAttr ? normalize(join(cur.dir, pathAttr)) : [join(cur.dir, `${m[2]}.rs`), join(cur.dir, m[2], 'mod.rs')].find(exists);
+          if (!child || !exists(child)) throw new Error(`${file}:${k + 1}: mod ${m[2]}: no file`);
+          walk(child, child.endsWith('/mod.rs') || pathAttr ? dirname(child) : child.slice(0, -'.rs'.length), `${cur.path}${m[2]}::`, modCfgs);
+        }
+      }
+      pathAttr = null;
+      attrCfgs = [];
+    });
+    const declared = (code.match(/\bmod\s+\w+\s*[;{]/g) ?? []).length;
+    if (declared !== mods) throw new Error(`${file}: ${declared} module declarations in the code, ${mods} followed: write each on a line of its own, as rustfmt does`);
+    const pathAttrs = (code.match(/#\s*\[\s*path\b/g) ?? []).length;
+    if (pathAttrs !== paths) throw new Error(`${file}: ${pathAttrs} #[path] attributes in the code, ${paths} followed`);
+    if (/\bcfg_attr\s*\([^\]]*\bpath\s*=/.test(code)) throw new Error(`${file}: #[cfg_attr(..., path = ...)] is not followed: classify it by hand`);
+    for (const call of macroCalls(file).filter((c) => c.name === 'include')) {
+      if (call.plainPath === null) throw new Error(`${file}:${call.line}: include! of a path that is not one string literal: classify it by hand`);
+      const target = normalize(join(dirname(file), call.plainPath));
+      if (!exists(target)) throw new Error(`${file}:${call.line}: include!(${JSON.stringify(call.plainPath)}): no such file`);
+      out.push({ file: target, path, cfgs: own, includedBy: file });
+    }
+  };
+  walk(root, dirname(root), '', []);
+  return out;
+}
+
+// The functions of a file: { name, start, end, test, cfgs, mods }, with
+// their 0-based first and last lines (the closing `}` at the `fn`'s
+// indentation; a declaration without a body, or a body on one line, ends
+// where it starts), whether an attribute above is `#[test]` or
+// `#[tokio::test...]`, the cfg predicates of its attributes and of the
+// inline modules around it, and those modules' path (`a::b::`).
+const functions = cached((file) => {
+  const lines = read(file).split('\n');
+  const { code, starts } = lexed(file);
+  const codeLines = code.split('\n');
+  const out = [];
+  const stack = [{ indent: -1, path: '', cfgs: [] }];
+  let attrCfgs = [];
+  codeLines.forEach((text, k) => {
+    const trimmed = text.trimEnd();
+    if (stack.length > 1 && trimmed === `${' '.repeat(stack.at(-1).indent)}}`) stack.pop();
+    if (/^\s*#\[/.test(text)) {
+      const c = /^\s*#\[cfg\((.*)\)\]\s*$/.exec(lines[k]);
+      if (c) attrCfgs.push(c[1]);
+      return;
+    }
+    if (trimmed === '') return;
+    const mod = /^(\s*)(?:pub(?:\([^)]*\))? )?mod (\w+)\s*\{$/.exec(trimmed);
+    if (mod) stack.push({ indent: mod[1].length, path: `${stack.at(-1).path}${mod[2]}::`, cfgs: [...stack.at(-1).cfgs, ...attrCfgs] });
+    const fn = /^(\s*)(?:pub(?:\([^)]*\))? )?(?:const )?(?:async )?(?:unsafe )?(?:extern "\s*" )?fn (\w+)/.exec(text);
+    if (fn) {
+      const attrs = [];
+      for (let a = k - 1; a >= 0 && (/^\s*#\[/.test(codeLines[a]) || codeLines[a].trim() === ''); a--) if (/^\s*#\[/.test(codeLines[a])) attrs.push(lines[a]);
+      const rest = code.slice(starts[k]);
+      const brace = rest.indexOf('{');
+      const semi = rest.indexOf(';');
+      let end = k;
+      if (brace >= 0 && (semi < 0 || brace < semi) && !/\}$/.test(trimmed)) {
+        end = codeLines.findIndex((l, j) => j > k && l.trimEnd() === `${fn[1]}}`);
+        if (end < 0) throw new Error(`${file}:${k + 1}: fn ${fn[2]}: no closing } at its indentation`);
+      }
+      out.push({ name: fn[2], start: k, end, test: attrs.some((l) => /^\s*#\[(tokio::)?test\b/.test(l)), cfgs: [...stack.at(-1).cfgs, ...attrCfgs], mods: stack.at(-1).path });
+    }
+    attrCfgs = [];
+  });
+  return out;
+});
+// The innermost function around a 1-based line, if any.
+const functionAt = (file, line) => functions(file).filter((f) => f.start <= line - 1 && line - 1 <= f.end).at(-1);
+
+// Every test target of the workspace, as nextest names its binary: { id,
+// kind, root }. From the manifests: the workspace's members and of each its
+// library (`src/lib.rs`: its unit tests), its binary (`src/main.rs`) and
+// `src/bin/*` binaries, `tests/*.rs` and `tests/*/main.rs` unless
+// `autotests = false`, and each `[[test]]`. A manifest table or a
+// directory of targets this does not read (`[lib]`, `[[bin]]`, examples,
+// benches) throws, to be added here.
+function workspaceTargets() {
+  const members = /^members = \[([^\]]*)\]$/m.exec(read('Cargo.toml'))[1].match(/"[^"]+"/g).map((s) => JSON.parse(s));
+  const out = [];
+  for (const dir of members) {
+    const toml = read(join(dir, 'Cargo.toml'));
+    const pkg = /^\[package\]\nname = "([^"]+)"$/m.exec(toml)[1];
+    for (const table of toml.match(/^\[\[?[^\]]+\]\]?$/gm)) {
+      if (!['[package]', '[dependencies]', '[dev-dependencies]', '[build-dependencies]', '[features]', '[lints]', '[[test]]'].includes(table) && !/^\[(target\.|lints\.|package\.metadata)/.test(table)) throw new Error(`${dir}/Cargo.toml: ${table}: a table the target discovery does not read`);
+    }
+    for (const d of ['examples', 'benches']) if (exists(join(dir, d))) throw new Error(`${dir}/${d}: targets the discovery does not read`);
+    const at = (f) => exists(join(dir, f));
+    if (at('src/lib.rs')) out.push({ id: pkg, kind: 'lib', root: join(dir, 'src/lib.rs') });
+    if (at('src/main.rs')) out.push({ id: `${pkg}::bin/${pkg}`, kind: 'bin', root: join(dir, 'src/main.rs') });
+    const entries = (d) => (at(d) ? readdirSync(join(REPO, dir, d), { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1)) : []);
+    for (const e of entries('src/bin')) {
+      if (e.isFile() && e.name.endsWith('.rs')) out.push({ id: `${pkg}::bin/${e.name.slice(0, -3)}`, kind: 'bin', root: join(dir, 'src/bin', e.name) });
+      else if (e.isDirectory() && at(`src/bin/${e.name}/main.rs`)) out.push({ id: `${pkg}::bin/${e.name}`, kind: 'bin', root: join(dir, 'src/bin', e.name, 'main.rs') });
+    }
+    if (!/^autotests = false$/m.test(toml)) {
+      for (const e of entries('tests')) {
+        if (e.isFile() && e.name.endsWith('.rs')) out.push({ id: `${pkg}::${e.name.slice(0, -3)}`, kind: 'test', root: join(dir, 'tests', e.name) });
+        else if (e.isDirectory() && at(`tests/${e.name}/main.rs`)) out.push({ id: `${pkg}::${e.name}`, kind: 'test', root: join(dir, 'tests', e.name, 'main.rs') });
+      }
+    }
+    for (const block of toml.split(/^\[\[test\]\]$/m).slice(1)) {
+      const body = block.split(/^\[/m)[0];
+      const name = /^name = "([^"]+)"$/m.exec(body)[1];
+      out.push({ id: `${pkg}::${name}`, kind: 'test', root: join(dir, /^path = "([^"]+)"$/m.exec(body)?.[1] ?? `tests/${name}.rs`) });
+    }
   }
   return out;
 }
 
-// The files a test target compiles in, from its crate root: { file, path }
-// with the module path (`a::b::`) of each, following `mod NAME;`, inline
-// `mod NAME { ... }` (closed by a `}` at its indentation, as rustfmt writes
-// it) and `#[path = "..."]`.
-function moduleFiles(root) {
-  const out = [{ file: root, path: '' }];
-  const walk = (file, dir, path) => {
-    const stack = [{ indent: -1, dir, path }];
-    let pathAttr = null;
-    for (const text of readFileSync(join(REPO, file), 'utf8').split('\n')) {
-      if (stack.length > 1 && text === `${' '.repeat(stack.at(-1).indent)}}`) {
-        stack.pop();
-        continue;
-      }
-      const attr = /^\s*#\[path = "([^"]+)"\]$/.exec(text);
-      if (attr) pathAttr = attr[1];
-      if (/^\s*(#\[|\/\/)/.test(text)) continue;
-      const m = /^(\s*)(?:pub(?:\([^)]*\))? )?mod (\w+)(;| \{)$/.exec(text);
-      if (m) {
-        const cur = stack.at(-1);
-        if (m[3] === ' {') stack.push({ indent: m[1].length, dir: join(cur.dir, m[2]), path: `${cur.path}${m[2]}::` });
-        else {
-          const child = pathAttr ? join(cur.dir, pathAttr) : [join(cur.dir, `${m[2]}.rs`), join(cur.dir, m[2], 'mod.rs')].find((f) => existsSync(join(REPO, f)));
-          assert.ok(child && existsSync(join(REPO, child)), `${file}: mod ${m[2]}: no file`);
-          out.push({ file: child, path: `${cur.path}${m[2]}::` });
-          walk(child, child.endsWith('/mod.rs') ? dirname(child) : child.slice(0, -'.rs'.length), `${cur.path}${m[2]}::`);
-        }
-      }
-      pathAttr = null;
+// Every file a test target compiles in: file -> [{ bin, path, cfgs }], one
+// per target and module it is in (a shared helper is in several).
+const workspaceFilesOnce = cached(() => {
+  const files = new Map();
+  for (const t of workspaceTargets()) {
+    for (const m of moduleFiles(t.root)) {
+      if (!files.has(m.file)) files.set(m.file, []);
+      files.get(m.file).push({ bin: t.id, path: m.path, cfgs: m.cfgs });
     }
-  };
-  walk(root, dirname(root), '');
-  return out;
-}
+  }
+  return files;
+});
+const workspaceFiles = () => workspaceFilesOnce('all');
+// Whether every target and module a file is in is in a selection.
+const inSelections = (file) => workspaceFiles().get(file).every(({ bin, path }) => SELECTIONS.some(([b, prefix]) => b === bin && path.startsWith(prefix)));
 
 // The selections' targets: binary ID and crate root.
 const TARGETS = [
@@ -236,35 +540,47 @@ const TARGETS = [
 const SCANNED = TARGETS.flatMap(([bin, root]) => {
   const prefix = SELECTIONS.find(([b]) => b === bin)[1];
   return moduleFiles(root)
-    .map((m) => ({ bin, ...m, selected: m.path.startsWith(prefix) || (m.path === '' && prefix === '') }))
+    .map((m) => ({ bin, file: m.file, path: m.path, selected: m.path.startsWith(prefix) || (m.path === '' && prefix === '') }))
     .filter((m) => m.selected || m.path === '' || /^(common|support|harness)::/.test(m.path));
 });
 
+// The tests of a selection that compile in the root step's build: their
+// names as nextest lists them (module path and function), from the test
+// functions (`#[test]`, `#[tokio::test]`) of its target's files whose
+// module path starts with its prefix, leaving out those under a cfg that
+// does not hold there (cfgOn). Every test attribute in those files must be
+// on a function it found, else it throws.
+function sourceTests(bin) {
+  const prefix = SELECTIONS.find(([b]) => b === bin)[1];
+  const root = workspaceTargets().find((t) => t.id === bin).root;
+  const names = [];
+  const seen = new Set();
+  for (const m of moduleFiles(root)) {
+    const fns = functions(m.file).filter((f) => f.test && `${m.path}${f.mods}${f.name}`.startsWith(prefix));
+    if (fns.length === 0) continue;
+    if (seen.has(m.file)) throw new Error(`${m.file} is in ${bin} twice`);
+    seen.add(m.file);
+    const attrs = (lexed(m.file).code.match(/#\s*\[\s*(?:tokio\s*::\s*)?test\b/g) ?? []).length;
+    if (attrs !== functions(m.file).filter((f) => f.test).length) throw new Error(`${m.file}: ${attrs} test attributes, ${functions(m.file).filter((f) => f.test).length} on functions found: write each on a line of its own above its fn`);
+    for (const f of fns) if ([...m.cfgs, ...f.cfgs].every(cfgOn)) names.push(`${m.path}${f.mods}${f.name}`);
+  }
+  return names;
+}
+
 // Every notice of SCANNED: { file, line, text, bin, path, selected, fn,
 // test }, the text as printed (continuations joined, `{NAME}` replaced by
-// that constant's value, other placeholders by X), and the function around
-// it, if it is still open there (no `}` at its indentation in between),
-// and whether that function is a test.
+// that constant's value, other placeholders by X), the function around it
+// (with the path of the inline modules it is in), if any, and whether that
+// function is a test.
 function sourceNotices() {
   const out = [];
   for (const { bin, file, path, selected } of SCANNED) {
-    const source = readFileSync(join(REPO, file), 'utf8');
-    const lines = source.split('\n');
-    const consts = Object.fromEntries([...source.matchAll(/^const (\w+): (?:&str = "([^"]*)"|\w+ = (\d+));$/gm)].map((m) => [m[1], m[2] ?? m[3]]));
-    for (const { text: raw, line } of stringLiterals(source)) {
+    const consts = Object.fromEntries([...read(file).matchAll(/^const (\w+): (?:&str = "([^"]*)"|\w+ = (\d+));$/gm)].map((m) => [m[1], m[2] ?? m[3]]));
+    for (const { text: raw, line } of lexed(file).literals) {
       if (!raw.includes('NOTICE:')) continue;
       const text = raw.replace(/\\\n\s*/g, '').replace(/\\"/g, '"').replace(/\{(\w*)[^}]*\}/g, (_, name) => consts[name] ?? 'X');
-      let fn;
-      let test = false;
-      for (let k = line - 1; k >= 0; k--) {
-        const m = /^(\s*)(?:pub(?:\([^)]*\))? )?(?:async )?fn (\w+)/.exec(lines[k]);
-        if (!m) continue;
-        if (lines.slice(k + 1, line - 1).some((l) => l === `${m[1]}}`)) break;
-        fn = m[2];
-        for (let a = k - 1; a >= 0 && /^\s*(#\[|\/\/)/.test(lines[a]); a--) if (/^\s*#\[(tokio::)?test\b/.test(lines[a])) test = true;
-        break;
-      }
-      out.push({ file, line, text, bin, path, selected, fn, test });
+      const f = functionAt(file, line);
+      out.push({ file, line, text, bin, path: `${path}${f?.mods ?? ''}`, selected, fn: f?.name, test: f?.test ?? false });
     }
   }
   return out;
@@ -648,7 +964,7 @@ describe('summarize', () => {
     const selected = [...SELECTED, 'skyoauth-service::local_transport a_bind_is_never_skipped'];
     const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${N + 1} tests run: ${N + 1} passed, 3 skipped\n`, '0', '0', listing(selected));
     assert.equal(r.status, 0, r.stdout);
-    assert.match(r.summary, new RegExp(`^- \`skyoauth-service::local_transport\`: ${LT + 1} of ${LT + 1} selected tests ran and passed$`, 'm'));
+    assert.match(r.summary, new RegExp(`^- \`skyoauth-service::local_transport\`: ${LT + 1} of ${LT + 1} selected tests ran and passed \\(MIN_TESTS: ${LT}\\)$`, 'm'));
   });
 
   test('the last summary line counts; a slow test passes', () => {
@@ -670,9 +986,34 @@ describe('summarize', () => {
       assert.equal(r.status, 1, gone);
       // That selection's required tests are not listed either.
       assert.deepEqual(errors(r), [`::error::the listing selects no test of ${name}`, ...REQUIRED.filter((t) => t.startsWith(gone)).map((t) => requiredError(t, 'not listed'))]);
-      assert.match(r.summary, new RegExp(`^- ${escapeRe(name)}: 0 of 0 selected tests ran and passed$`, 'm'));
+      assert.match(r.summary, new RegExp(`^- ${escapeRe(name)}: 0 of 0 selected tests ran and passed \\(MIN_TESTS: \\d+\\)$`, 'm'));
       assert.doesNotMatch(r.summary, COMPLETE);
     }
+  });
+
+  // A test removed from a selection (deleted, renamed out of its prefix,
+  // compiled out) that no check requires by name: every count still
+  // agrees, and only MIN_TESTS notices.
+  test('a selection that lists fewer tests than its MIN_TESTS fails, naming both numbers; more pass', () => {
+    for (const [bin, prefix] of SELECTIONS) {
+      const gone = FILLER.find((t) => t.startsWith(`${bin} `)) ?? EXTRA.find((t) => t.startsWith(`${bin} `));
+      const selected = SELECTED.filter((t) => t !== gone);
+      const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, ${LEFT_OUT.length} skipped\n`, '0', '0', listing(selected));
+      assert.equal(r.status, 1, bin);
+      const name = `\`${bin}\`${prefix ? ` \`${prefix}*\`` : ''}`;
+      const min = minOf(bin);
+      const message = `${name}: the listing selects ${min - 1} tests, fewer than its minimum of ${min} (MIN_TESTS in scripts/ci/root-transport-run.sh): a test was removed, renamed or compiled out`;
+      assert.deepEqual(errors(r), [`::error::${message}`]);
+      assert.match(r.summary, new RegExp(`^- \\*\\*Failed:\\*\\* ${escapeRe(message)}$`, 'm'));
+      assert.match(r.summary, new RegExp(`^- ${escapeRe(name)}: ${min - 1} of ${min - 1} selected tests ran and passed \\(MIN_TESTS: ${min}\\)$`, 'm'));
+      assert.doesNotMatch(r.summary, COMPLETE);
+      // One more than the minimum passes.
+      const more = [...SELECTED, madeUp(bin, 'a_new_test')];
+      const ok = summarize(`${START}${passLines(more)}     Summary [   1.000s] ${more.length} tests run: ${more.length} passed, ${LEFT_OUT.length} skipped\n`, '0', '0', listing(more));
+      assert.equal(ok.status, 0, ok.stdout);
+    }
+    // The fixture lists exactly each minimum.
+    for (const [bin, min] of MIN_TESTS) assert.equal(inBinary(bin), min, bin);
   });
 
   test('a selected test without a PASS line fails its selection, even when the counts agree', () => {
@@ -717,9 +1058,9 @@ describe('summarize', () => {
       'skyoauth-scenarios::pg harness::socket_path_fixture::socket_path_fixture_cases_match_the_services_bind',
       'skyoauth-service::local_transport the_service_uid_cannot_redirect_a_bind',
     ]) {
-      // The harness selection has one test: give it a sibling that runs.
-      const sibling = 'skyoauth-scenarios::pg harness::socket_path_fixture::a_sibling';
-      const selected = [...SELECTED.filter((t) => t !== dropped), ...(dropped.startsWith('skyoauth-scenarios') ? [sibling] : [])];
+      // A sibling that runs takes its place, so that its selection still
+      // lists MIN_TESTS tests and the skipped mark is what fails.
+      const selected = [...SELECTED.filter((t) => t !== dropped), madeUp(dropped.split(' ')[0], 'a_sibling')];
       const leftOut = [...LEFT_OUT, dropped];
       const line = `Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, ${leftOut.length} skipped`;
       const r = summarize(`${START}${passLines(selected)}     ${line}\n`, '0', '0', listing(selected, leftOut));
@@ -852,7 +1193,8 @@ describe('summarize', () => {
 
   test('a required test that is not listed and did not run fails, by name, though every count agrees', () => {
     for (const gone of REQUIRED) {
-      const selected = SELECTED.filter((t) => t !== gone);
+      // Another test in its place: its selection still lists MIN_TESTS.
+      const selected = [...SELECTED.filter((t) => t !== gone), madeUp(gone.split(' ')[0], 'another_test')];
       const r = summarize(`${START}${passLines(selected)}     Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, ${LEFT_OUT.length} skipped\n`, '0', '0', listing(selected));
       assert.equal(r.status, 1, gone);
       assert.deepEqual(errors(r), [requiredError(gone, 'not listed')]);
@@ -884,6 +1226,402 @@ describe('summarize', () => {
       'socket path cases were NOT bound by the service',
       'no socket path case was bound by the service',
     ]);
+  });
+});
+
+// The checks of the whole workspace's Rust sources: root-only notices and
+// branches outside the selections (ROOT_ALLOWLIST), notices built where
+// the literal scan cannot see them (MACRO_ALLOWLIST), and each selection's
+// test count against MIN_TESTS.
+const NOTICE_FAILS = /^NOTICE_FAILS='([^']*)'$/m.exec(readFileSync(SCRIPT, 'utf8'))[1].split('\n');
+// Text that says root-only cases did not run: a NOTICE_FAILS string, the
+// peer user variable, "need(s) root", or a notice that mentions root.
+const rootOnlyText = (t) => NOTICE_FAILS.some((f) => t.includes(f)) || /\bPEER_USER_VAR\b/.test(t) || /\bneeds? root\b/i.test(t) || (/\bnotice\b/i.test(t) && /\broot\b/i.test(t));
+// Code that branches on running as root (UID 0), e.g. `if uid == 0 {`,
+// `uid != ROOT_UID`, `geteuid().as_raw() != 0`, `Uid::effective().is_root()`:
+// a test that does part of its work only as root (or only not as root),
+// with or without a notice.
+const ROOT_BRANCH = /\b\w*uid\w*\b[\w().:]*\s*(?:==|!=)\s*(?:0|ROOT_UID)\b|\b(?:0|ROOT_UID)\s*(?:==|!=)\s*[\w().:&]*uid|\bis_root\s*\(/;
+
+// What is root-only outside the three selections, by the test function it
+// is in: each entry's `lines` are the source lines found there (trimmed),
+// and its reason says why it need not run in the root step. A finding
+// outside the selections that is not listed here, or listed with other
+// lines, fails; so does an entry nothing matches any more.
+const LIBRARY_ROOT_TESTS = "the library's own root-only tests are not part of the root step (manual root run)";
+const ROOT_ALLOWLIST = [
+  {
+    file: 'service/src/local_transport/connection.rs',
+    fn: 'a_refused_peer_is_answered_before_any_read',
+    lines: ['if uid == ROOT_UID {', 'eprintln!("NOTICE: running as root: the in-process refused-peer check was NOT run");'],
+    reason: 'it skips itself as root, with a notice, and runs in the non-root jobs; as root, `local_transport` `a_peer_of_another_uid_is_refused` (REQUIRED) checks the refused peer',
+  },
+  {
+    file: 'operator/tests/local_exchange/mod.rs',
+    fn: 'a_connection_without_permission_is_not_sent',
+    lines: ['if std::fs::metadata(&path).unwrap().uid() == 0 {', 'eprintln!("NOTICE: running as root: the socket mode check was NOT run");'],
+    reason: 'it skips itself as root, with a notice (root is not held back by the socket mode it checks), and runs in the non-root operator jobs',
+  },
+  // Its root-only case ("another owner") is skipped silently, with no
+  // notice: `continue` when not root.
+  { file: 'service/src/local_transport/socket.rs', fn: 'a_directory_swapped_in_before_its_check_is_not_verified', lines: ['if what == "another owner" && uid != 0 {'], reason: LIBRARY_ROOT_TESTS },
+  { file: 'service/src/local_transport/socket.rs', fn: 'a_leftover_directory_keeps_what_a_bind_did_not_put_there', lines: ['if uid == 0 {'], reason: LIBRARY_ROOT_TESTS },
+  { file: 'service/src/local_transport/socket.rs', fn: 'the_socket_directory_has_a_trusted_owner', lines: ['if uid == 0 {'], reason: LIBRARY_ROOT_TESTS },
+  { file: 'service/src/local_transport/socket.rs', fn: 'every_directory_on_the_way_is_checked', lines: ['if uid == 0 {', 'if uid == 0 {', 'if uid == 0 {'], reason: LIBRARY_ROOT_TESTS },
+  {
+    file: 'service/src/local_transport/socket.rs',
+    fn: 'a_link_in_a_sticky_directory_needs_a_trusted_owner',
+    // The first line checks that /tmp is root's (not that the test runs as
+    // root).
+    lines: ['.is_ok_and(|metadata| metadata.uid() == 0 && metadata.mode() & 0o1002 == 0o1002)', 'eprintln!("NOTICE: no root-owned sticky /tmp: links in it were NOT tested");', 'if uid == 0 {', 'if uid == 0 {'],
+    reason: `${LIBRARY_ROOT_TESTS}; its notice is about the machine's /tmp, which running as root does not change`,
+  },
+];
+
+// Every root-only finding of the workspace's test targets: { file, line,
+// kind, fn, source, selected }, `selected` when every target and module the
+// file is in is in a selection.
+function rootOnlyFindings() {
+  const out = [];
+  for (const [file] of workspaceFiles()) {
+    const { literals, code } = lexed(file);
+    const lines = read(file).split('\n');
+    const found = new Map();
+    for (const { text, line } of literals) if (rootOnlyText(text)) found.set(line, 'root-only text');
+    code.split('\n').forEach((c, k) => {
+      if (found.has(k + 1)) return;
+      if (/\bPEER_USER_VAR\b/.test(c)) found.set(k + 1, 'the peer user variable');
+      else if (ROOT_BRANCH.test(c) && functionAt(file, k + 1)?.test) found.set(k + 1, 'a branch on root');
+    });
+    const selected = inSelections(file);
+    for (const [line, kind] of [...found].sort((a, b) => a[0] - b[0])) out.push({ file, line, kind, fn: functionAt(file, line)?.name, source: lines[line - 1].trim(), selected });
+  }
+  return out;
+}
+
+function rootOnlyProblems(findings = rootOnlyFindings()) {
+  const out = [];
+  const groups = new Map();
+  for (const f of findings.filter((x) => !x.selected)) {
+    const key = `${f.file} ${f.fn}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(f);
+  }
+  for (const [key, found] of groups) {
+    const entry = ROOT_ALLOWLIST.find((e) => `${e.file} ${e.fn}` === key);
+    if (!entry) {
+      for (const f of found) out.push(`${f.file}:${f.line}: ${f.kind} outside the three selections (${f.fn ? `fn ${f.fn}` : 'no function'}): ${f.source}: run it in a selection of the root step, or add it to ROOT_ALLOWLIST with the reason it need not run there`);
+    } else if (JSON.stringify(found.map((f) => f.source).sort()) !== JSON.stringify([...entry.lines].sort())) {
+      out.push(`ROOT_ALLOWLIST: ${key}: it lists ${JSON.stringify(entry.lines)}, the source has ${JSON.stringify(found.map((f) => f.source))}`);
+    }
+  }
+  for (const e of ROOT_ALLOWLIST) if (!groups.has(`${e.file} ${e.fn}`)) out.push(`ROOT_ALLOWLIST: ${e.file} ${e.fn}: nothing root-only there any more`);
+  return out;
+}
+
+// The calls of concat!, include!, include_str!, include_bytes! and
+// stringify! that may stand in a file whose notices are classified
+// (SCANNED), or in a function that says NOTICE, each with a reason; the
+// calls are still checked for notice text.
+const FIXTURE_PATH = 'the path of a conformance fixture under CARGO_MANIFEST_DIR; no notice text';
+const MACRO_ALLOWLIST = [
+  { file: 'tests/harness/local_transport_wire.rs', fn: 'fixture', macro: 'concat', reason: FIXTURE_PATH },
+  { file: 'tests/harness/public_identity_fixture.rs', fn: 'fixture', macro: 'concat', reason: FIXTURE_PATH },
+  { file: 'tests/harness/recovery_challenge_fixture.rs', fn: 'fixture', macro: 'concat', reason: FIXTURE_PATH },
+  { file: 'tests/harness/recovery_key_fixture.rs', fn: 'fixture', macro: 'concat', reason: FIXTURE_PATH },
+  { file: 'tests/harness/socket_path_fixture.rs', fn: 'fixture', macro: 'concat', reason: FIXTURE_PATH },
+  { file: 'tests/harness/wire_errors.rs', fn: 'catalogue', macro: 'concat', reason: FIXTURE_PATH },
+];
+
+// The string constants a file defines (`const NAME: &str = "...";`), by
+// name.
+const stringConsts = cached((file) => Object.fromEntries([...read(file).matchAll(/^\s*(?:pub(?:\([^)]*\))? )?(?:const|static) (\w+): &(?:'static )?str = "((?:[^"\\]|\\.)*)";$/gm)].map((m) => [m[1], m[2]])));
+// What a formatting macro call prints, as far as its file shows: its
+// literals with `{NAME}` replaced by the file's string constant NAME, and
+// each constant passed as an argument, joined.
+function resolvedText(file, call) {
+  const consts = stringConsts(file);
+  const parts = call.literals.map((l) => l.text.replace(/\{(\w+)[^}]*\}/g, (all, name) => consts[name] ?? all));
+  for (const m of call.code.matchAll(/\b([A-Z][A-Z0-9_]*)\b/g)) if (m[1] in consts) parts.push(consts[m[1]]);
+  return parts.join('');
+}
+
+// Notices the literal scan cannot see: built by concat! or stringify!, read
+// by include_str!/include_bytes!, or printed from parts or constants (no
+// one literal of the call holds `NOTICE:`); and the macros that need an
+// entry in MACRO_ALLOWLIST. include! is followed by moduleFiles.
+function constructProblems() {
+  const out = [];
+  const scanned = new Set(SCANNED.map((s) => s.file));
+  const used = new Set();
+  for (const [file] of workspaceFiles()) {
+    const lines = read(file).split('\n');
+    for (const call of macroCalls(file)) {
+      const where = `${file}:${call.line}: ${call.name}!`;
+      if (FORMATTING.includes(call.name)) {
+        if (/NOTICE/.test(resolvedText(file, call)) && !call.literals.some((l) => l.text.includes('NOTICE:'))) out.push(`${where} prints a NOTICE built from parts or constants: write the notice as one literal`);
+        continue;
+      }
+      const parts = call.literals.map((l) => l.text).join('');
+      if (call.name === 'concat' && (/notice/i.test(parts) || rootOnlyText(parts))) out.push(`${where} builds notice text from parts: write it as one literal`);
+      if (call.name === 'stringify' && /notice/i.test(call.code)) out.push(`${where} turns code that says NOTICE into text`);
+      if (call.name === 'include_str' || call.name === 'include_bytes') {
+        const target = call.plainPath === null ? null : normalize(join(dirname(file), call.plainPath));
+        if (target === null) out.push(`${where} of a path that is not one string literal: classify it by hand`);
+        else if (!exists(target)) out.push(`${where}: ${target}: no such file`);
+        else if (/notice/i.test(read(target)) || rootOnlyText(read(target))) out.push(`${where}: ${target} holds notice or root-only text`);
+      }
+      const f = functionAt(file, call.line);
+      const entry = MACRO_ALLOWLIST.find((e) => e.file === file && e.fn === f?.name && e.macro === call.name);
+      const scope = f ? lines.slice(f.start, f.end + 1).join('\n') : read(file).slice(call.open, call.close + 1);
+      if (entry) used.add(entry);
+      else if (/notice/i.test(scope)) out.push(`${where} in ${f ? `fn ${f.name}` : 'an item'}, which says NOTICE: classify it by hand (MACRO_ALLOWLIST)`);
+      else if (scanned.has(file)) out.push(`${where} in a file whose notices are classified (SCANNED): add it to MACRO_ALLOWLIST with a reason`);
+    }
+  }
+  for (const e of MACRO_ALLOWLIST) if (!used.has(e)) out.push(`MACRO_ALLOWLIST: ${e.file} fn ${e.fn}: no ${e.macro}! there any more`);
+  return out;
+}
+
+// Each selection's tests in the sources against its MIN_TESTS (exact).
+const minProblems = () =>
+  SELECTIONS.flatMap(([bin]) => {
+    const count = sourceTests(bin).length;
+    return count === minOf(bin) ? [] : [`${bin}: ${count} tests in the sources, MIN_TESTS says ${minOf(bin)}: set it to ${count}`];
+  });
+
+// Every .rs file under the workspace's members (not under `target`).
+const rustFiles = () => {
+  const out = [];
+  const walk = (dir) => {
+    for (const e of readdirSync(join(REPO, dir), { withFileTypes: true })) {
+      if (e.isDirectory() && e.name !== 'target' && e.name !== 'node_modules') walk(join(dir, e.name));
+      else if (e.isFile() && e.name.endsWith('.rs')) out.push(join(dir, e.name));
+    }
+  };
+  for (const m of /^members = \[([^\]]*)\]$/m.exec(read('Cargo.toml'))[1].match(/"[^"]+"/g).map((s) => JSON.parse(s))) walk(m);
+  return out.sort();
+};
+// The .rs files no test target compiles in, each with a reason.
+const NOT_IN_A_TARGET = { 'service/build.rs': 'the build script: it is no test target and prints no test output' };
+
+// A scratch copy of a test function's text with a line added after its
+// first line (in memory, see withSources).
+const withLineIn = (file, fnName, line) => {
+  const f = functions(file).find((x) => x.name === fnName);
+  assert.ok(f, `${file}: no fn ${fnName}`);
+  const lines = read(file).split('\n');
+  lines.splice(f.start + 1, 0, line);
+  return lines.join('\n');
+};
+const firstTest = (file) => functions(file).find((f) => f.test && f.end > f.start + 1).name;
+const OTHER_TARGET = 'service/tests/jwk.rs';
+const OPERATOR_OTHER = 'operator/tests/challenge/mod.rs';
+
+describe('the workspace\'s Rust sources', () => {
+  test('the lexer: comments, nested comments, raw, byte and C strings, chars and lifetimes, escapes', () => {
+    const src = [
+      '/// "NOTICE: a doc comment"',
+      '//! "NOTICE: an inner doc comment"',
+      '/* outer /* "NOTICE: nested" */ still a comment "NOTICE: x" */',
+      "fn f<'a>(x: &'a str) -> char { let q = '\"'; let e = '\\''; let b = '\\\\'; let u = '\\u{22}'; q }",
+      'let s = "a \\" NOTICE: b"; let r = r##"raw "# NOTICE: c"##; let y = b"NOTICE: d"; let z = c"NOTICE: e"; let w = br#"NOTICE: f"#;',
+      'let m = "include!(\\"x.rs\\") concat!(\\"NOTI\\", \\"CE\\")"; // include!("y.rs")',
+      'let multi = "NOTICE: one \\',
+      '    two";',
+    ].join('\n');
+    const { literals, code } = lex(src);
+    assert.deepEqual(
+      literals.map((l) => [l.line, l.text]),
+      [
+        [5, 'a \\" NOTICE: b'],
+        [5, 'raw "# NOTICE: c'],
+        [5, 'NOTICE: d'],
+        [5, 'NOTICE: e'],
+        [5, 'NOTICE: f'],
+        [6, 'include!(\\"x.rs\\") concat!(\\"NOTI\\", \\"CE\\")'],
+        [7, 'NOTICE: one \\\n    two'],
+      ],
+    );
+    // The code: the same length and lines, nothing of a comment or a
+    // literal left, and so no macro call in them.
+    assert.equal(code.length, src.length);
+    assert.deepEqual(code.split('\n').map((l) => l.length), src.split('\n').map((l) => l.length));
+    assert.doesNotMatch(code, /NOTICE|include|concat|doc comment|nested/);
+    assert.match(code, /fn f<'a>\(x: &'a str\)/);
+    assert.equal(code.slice(literals[2].start, literals[2].end), 'b"         "');
+    withSources({ 'scratch/lexer.rs': src }, () => assert.deepEqual(macroCalls('scratch/lexer.rs'), []));
+    for (const bad of ['let s = "open', '/* open /* */', 'let r = r#"open"']) assert.throws(() => lex(bad), /unterminated/);
+  });
+
+  test('cfgOn: the root step\'s build (Linux on x86_64, all features); anything else must be classified', () => {
+    for (const [expr, on] of [
+      ['unix', true],
+      ['test', true],
+      ['target_os = "linux"', true],
+      ['not(target_os = "linux")', false],
+      ['any(target_os = "linux", target_os = "android")', true],
+      ['not(any(target_os = "linux", target_os = "android"))', false],
+      ['all(target_os = "linux", target_arch = "aarch64")', false],
+      ['feature = "test-support"', true],
+      ['any()', false],
+      ['all()', true],
+      ['not(unix)', false],
+    ]) {
+      assert.equal(cfgOn(expr), on, expr);
+    }
+    for (const expr of ['miri', 'debug_assertions', 'target_env = "musl"', 'panic = "abort"']) assert.throws(() => cfgOn(expr), /is not classified/, expr);
+  });
+
+  test('every test target is found, and every file a target compiles in is read', (t) => {
+    const targets = workspaceTargets();
+    for (const [bin, root] of TARGETS) assert.ok(targets.some((x) => x.id === bin && x.root === root), bin);
+    for (const lib of ['skyoauth-service', 'skyoauth-operator', 'skyoauth-scenarios']) assert.ok(targets.some((x) => x.id === lib && x.kind === 'lib'), lib);
+    assert.ok(targets.some((x) => x.id === 'skyoauth-service::bin/skyoauth-service'));
+    assert.ok(targets.filter((x) => x.kind === 'test' && x.id.startsWith('skyoauth-service::')).length > 30);
+    // Only operator and scenarios declare their test targets.
+    assert.deepEqual(targets.filter((x) => x.kind === 'test' && !x.id.startsWith('skyoauth-service::')).map((x) => x.id), ['skyoauth-scenarios::pg', 'skyoauth-operator::operator']);
+    const files = workspaceFiles();
+    assert.deepEqual(rustFiles().filter((f) => !files.has(f)), Object.keys(NOT_IN_A_TARGET));
+    t.diagnostic(`${targets.length} test targets (${targets.map((x) => x.id).join(', ')}), ${files.size} files`);
+    // A module the walk cannot follow, or a #[path] or include! it would
+    // have to, fails instead of leaving a file unread.
+    for (const [text, re] of [
+      ['#[cfg(test)] mod sneaky;\n', /jwk\.rs: 1 module declarations in the code, 0 followed/],
+      ['mod sneaky { mod inner; }\n', /module declarations in the code/],
+      ['#[path = "nowhere.rs"]\nmod sneaky;\n', /mod sneaky: no file/],
+      ['#[cfg_attr(unix, path = "x.rs")]\nmod sneaky;\n', /cfg_attr|no file/],
+      ['include!(concat!(env!("OUT_DIR"), "/x.rs"));\n', /include! of a path that is not one string literal/],
+      ['include!("nowhere.rs");\n', /no such file/],
+    ]) {
+      withSources({ [OTHER_TARGET]: `${read(OTHER_TARGET)}\n${text}` }, () => assert.throws(() => workspaceFiles(), re, text));
+    }
+    // A #[path] module and an included file are read like any module.
+    withSources({ [OTHER_TARGET]: `${read(OTHER_TARGET)}\n#[path = "elsewhere/x.rs"]\nmod sneaky;\ninclude!("y.rs");\n`, 'service/tests/elsewhere/x.rs': '', 'service/tests/y.rs': '' }, () => {
+      assert.deepEqual(workspaceFiles().get('service/tests/elsewhere/x.rs'), [{ bin: 'skyoauth-service::jwk', path: 'sneaky::', cfgs: [] }]);
+      assert.deepEqual(workspaceFiles().get('service/tests/y.rs'), [{ bin: 'skyoauth-service::jwk', path: '', cfgs: [] }]);
+    });
+  });
+
+  // A test outside the three selections that says root-only cases
+  // did not run, or branches on root, never runs as root in CI: each one is
+  // listed with its reason, so that a new one is a decision.
+  test('every root-only notice or branch outside the three selections is on ROOT_ALLOWLIST, with a reason', (t) => {
+    const findings = rootOnlyFindings();
+    assert.deepEqual(rootOnlyProblems(findings), []);
+    for (const e of ROOT_ALLOWLIST) assert.ok(e.reason.length > 20, `${e.file} ${e.fn}: no reason`);
+    assert.equal(ROOT_ALLOWLIST.find((e) => e.fn === 'a_directory_swapped_in_before_its_check_is_not_verified').reason, "the library's own root-only tests are not part of the root step (manual root run)");
+    // What the scan finds, per target (a shared file counts in each).
+    for (const target of workspaceTargets()) {
+      const mine = findings.filter((f) => workspaceFiles().get(f.file).some((o) => o.bin === target.id));
+      if (mine.length === 0) continue;
+      const inside = mine.filter((f) => f.selected).length;
+      t.diagnostic(`${target.id}: ${mine.length} root-only findings, ${inside} in the selections, ${mine.length - inside} allowlisted: ${[...new Set(mine.filter((f) => !f.selected).map((f) => `${f.file} ${f.fn}`))].join('; ') || '-'}`);
+    }
+    assert.ok(findings.some((f) => f.selected && f.file === 'service/tests/local_transport.rs'));
+  });
+
+  test('a new root-only notice or branch outside the selections fails, and so does a stale entry', () => {
+    const swapped = 'service/src/local_transport/socket.rs';
+    for (const [texts, re] of [
+      // A NOTICE_FAILS notice in another target's test.
+      [{ [OTHER_TARGET]: withLineIn(OTHER_TARGET, firstTest(OTHER_TARGET), '    eprintln!("NOTICE: the owner check needs root: it was NOT tried");') }, /service\/tests\/jwk\.rs:\d+: root-only text outside the three selections .*the owner check needs root/],
+      [{ [OTHER_TARGET]: withLineIn(OTHER_TARGET, firstTest(OTHER_TARGET), '    eprintln!("skipped: this needs root");') }, /root-only text outside/],
+      [{ [OPERATOR_OTHER]: withLineIn(OPERATOR_OTHER, firstTest(OPERATOR_OTHER), '    if std::env::var("SKYOAUTH_IT_PEER_USER").is_err() { return; }') }, /operator\/tests\/challenge\/mod\.rs:\d+: root-only text outside/],
+      [{ [OPERATOR_OTHER]: withLineIn(OPERATOR_OTHER, firstTest(OPERATOR_OTHER), '    let _ = PEER_USER_VAR;') }, /the peer user variable outside/],
+      // A silent skip: a branch on root with no notice.
+      [{ [OPERATOR_OTHER]: withLineIn(OPERATOR_OTHER, firstTest(OPERATOR_OTHER), '    if rustix::process::geteuid().as_raw() != 0 { return; }') }, /a branch on root outside/],
+      [{ [OPERATOR_OTHER]: withLineIn(OPERATOR_OTHER, firstTest(OPERATOR_OTHER), '    if !nix::unistd::Uid::effective().is_root() { return; }') }, /a branch on root outside/],
+      [{ [OPERATOR_OTHER]: withLineIn(OPERATOR_OTHER, firstTest(OPERATOR_OTHER), '    if 0 != uid { return; }') }, /a branch on root outside/],
+      // In a helper shared with targets outside the selections.
+      [{ 'service/tests/common/mod.rs': `${read('service/tests/common/mod.rs')}\npub fn x() { eprintln!("NOTICE: running as root: x was NOT run"); }\n` }, /service\/tests\/common\/mod\.rs:\d+: root-only text outside/],
+      // In the library's unit tests, besides an allowlisted one.
+      [{ [swapped]: withLineIn(swapped, 'a_directory_swapped_in_before_its_check_is_not_verified', '        eprintln!("NOTICE: running as root: x was NOT run");') }, /ROOT_ALLOWLIST: service\/src\/local_transport\/socket\.rs a_directory_swapped_in_before_its_check_is_not_verified: it lists/],
+      // The allowlisted silent skip gone: the entry is stale.
+      [{ [swapped]: edited(swapped, 'if what == "another owner" && uid != 0 {', 'if what == "another owner" && false {') }, /a_directory_swapped_in_before_its_check_is_not_verified: nothing root-only there any more/],
+    ]) {
+      withSources(texts, () => assert.match(rootOnlyProblems().join('\n'), re));
+    }
+    // In a selection, the same notice is the selection's (its kind and
+    // REQUIRED are checked by the other tests): no problem here.
+    const lt = 'service/tests/local_transport.rs';
+    withSources({ [lt]: withLineIn(lt, firstTest(lt), '    eprintln!("NOTICE: the owner check needs root: it was NOT tried");') }, () => assert.deepEqual(rootOnlyProblems(), []));
+  });
+
+  test('no notice is built where the literal scan cannot see it; the macros that could are allowlisted', () => {
+    assert.deepEqual(constructProblems(), []);
+    for (const e of MACRO_ALLOWLIST) assert.ok(SCANNED.some((s) => s.file === e.file) && e.reason, `${e.file}: not a scanned file, or no reason`);
+  });
+
+  test('a notice built by concat!, stringify!, an included file or from parts fails', () => {
+    const scannedFile = 'operator/tests/local_path/mod.rs';
+    const at = (file, line, extra = {}) => ({ [file]: withLineIn(file, firstTest(file), line), ...extra });
+    for (const [texts, re] of [
+      [at(OTHER_TARGET, '    eprintln!(concat!("NOTI", "CE: the owner check needs root: it was NOT tried"));'), /jwk\.rs:\d+: concat! builds notice text from parts/],
+      [at(OTHER_TARGET, '    eprintln!(concat!("NOTI", "CE: x"));'), /concat! builds notice text from parts/],
+      [at(OTHER_TARGET, '    eprintln!("{}{}", "NOTI", "CE: the owner check needs root");'), /eprintln! prints a NOTICE built from parts/],
+      [{ [OTHER_TARGET]: `const PREFIX: &str = "NOTICE:";\n${withLineIn(OTHER_TARGET, firstTest(OTHER_TARGET), '    eprintln!("{PREFIX} the owner check was NOT tried");')}` }, /eprintln! prints a NOTICE built from parts or constants/],
+      [{ [OTHER_TARGET]: `const PREFIX: &str = "NOTICE:";\n${withLineIn(OTHER_TARGET, firstTest(OTHER_TARGET), '    eprintln!("{} the owner check was NOT tried", PREFIX);')}` }, /eprintln! prints a NOTICE built from parts or constants/],
+      [at(OTHER_TARGET, '    eprintln!("{}", stringify!(NOTICE the owner check was not tried));'), /stringify! turns code that says NOTICE into text/],
+      [at(OTHER_TARGET, '    eprint!("{}", include_str!("notice.txt"));', { 'service/tests/notice.txt': 'NOTICE: the owner check needs root\n' }), /include_str!: service\/tests\/notice\.txt holds notice or root-only text/],
+      [at(OTHER_TARGET, '    let _ = include_str!("nowhere.txt");'), /include_str!: service\/tests\/nowhere\.txt: no such file/],
+      [at(OTHER_TARGET, '    let _ = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/x.txt"));'), /include_str! of a path that is not one string literal/],
+      // A macro in a function that says NOTICE, anywhere.
+      [at(OTHER_TARGET, '    let _ = (concat!("a", "b"), "NOTICE: x");'), /concat! in fn \w+, which says NOTICE: classify it by hand/],
+      // Any of them in a file whose notices are classified.
+      [at(scannedFile, '    let _ = concat!("a", "b");'), /local_path\/mod\.rs:\d+: concat! in a file whose notices are classified/],
+      // An entry with nothing left to match.
+      [{ 'tests/harness/wire_errors.rs': edited('tests/harness/wire_errors.rs', 'concat!(', 'std::convert::identity(') }, /MACRO_ALLOWLIST: tests\/harness\/wire_errors\.rs fn catalogue: no concat! there any more/],
+    ]) {
+      withSources(texts, () => assert.match(constructProblems().join('\n'), re));
+    }
+    // An included file's notices are scanned like a module's.
+    withSources({ [OTHER_TARGET]: `${read(OTHER_TARGET)}\ninclude!("extra.rs");\n`, 'service/tests/extra.rs': '#[test]\nfn extra() {\n    eprintln!("NOTICE: the owner check needs root: it was NOT tried");\n}\n' }, () =>
+      assert.match(rootOnlyProblems().join('\n'), /service\/tests\/extra\.rs:3: root-only text outside the three selections \(fn extra\)/),
+    );
+  });
+
+  // MIN_TESTS: exact here, a lower bound in the script (its comment says
+  // why), so that it cannot fall behind the sources unnoticed.
+  test('MIN_TESTS is each selection\'s test count in the Rust sources, on Linux with all features', (t) => {
+    assert.deepEqual(MIN_TESTS.map(([bin]) => bin), SELECTIONS.map(([bin]) => bin));
+    assert.equal(new Set(SELECTIONS.map(([bin]) => bin)).size, SELECTIONS.length, 'one selection per binary');
+    assert.deepEqual(minProblems(), []);
+    for (const [bin, prefix] of SELECTIONS) {
+      const names = sourceTests(bin);
+      t.diagnostic(`${bin}${prefix ? ` ${prefix}*` : ''}: ${names.length} tests in the sources, MIN_TESTS ${minOf(bin)}`);
+      for (const r of [...REQUIRED, ...EXTRA].filter((x) => x.startsWith(`${bin} `))) assert.ok(names.includes(r.slice(bin.length + 1)), `${r}: not a test of the sources`);
+    }
+    // `local_transport` has one test that does not compile on Linux.
+    assert.ok(!sourceTests('skyoauth-service::local_transport').includes('a_socket_path_over_the_limit_is_refused'));
+  });
+
+  test('a test deleted, compiled out or added in the sources makes MIN_TESTS fail here', () => {
+    const file = 'operator/tests/local_path/mod.rs';
+    const name = 'the_socket_must_be_the_expected_owners';
+    const f = functions(file).find((x) => x.name === name);
+    const lines = read(file).split('\n');
+    const attr = lines.slice(0, f.start).findLastIndex((l) => /^\s*#\[test\]$/.test(l));
+    assert.ok(attr >= 0 && attr >= f.start - 3, 'no #[test] right above it');
+    const without = (k) => [...lines.slice(0, k), ...lines.slice(k + 1)].join('\n');
+    const withLine = (k, text) => [...lines.slice(0, k), text, ...lines.slice(k)].join('\n');
+    // Against the sources as they are (the test above checks that they
+    // match MIN_TESTS).
+    const min = minOf('skyoauth-operator::operator');
+    const base = sourceTests('skyoauth-operator::operator').length;
+    const fewer = new RegExp(`^skyoauth-operator::operator: ${base - 1} tests in the sources, MIN_TESTS says ${min}: set it to ${base - 1}$`);
+    for (const [text, re] of [
+      [without(attr), fewer],
+      [withLine(attr, '#[cfg(any())]'), fewer],
+      [withLine(attr, '#[cfg(not(unix))]'), fewer],
+      [`${read(file)}\n#[test]\nfn one_more() {}\n`, new RegExp(`: ${base + 1} tests in the sources, MIN_TESTS says ${min}: set it to ${base + 1}$`)],
+    ]) {
+      withSources({ [file]: text }, () => assert.match(minProblems().filter((p) => p.startsWith('skyoauth-operator::operator:')).join('\n'), re));
+    }
+    // A cfg it cannot evaluate, or a test attribute it does not see on a
+    // function, throws instead of miscounting.
+    withSources({ [file]: withLine(attr, '#[cfg(miri)]') }, () => assert.throws(() => minProblems(), /miri is not classified/));
+    withSources({ [file]: `${read(file)}\n#[test] fn one_line() {}\n` }, () => assert.throws(() => minProblems(), /test attributes, \d+ on functions found/));
   });
 });
 
@@ -1208,14 +1946,14 @@ const problems = (ci) => {
   // It runs after a failed normal run too, not when that never ran.
   if (!/^ {8}if: \$\{\{ !cancelled\(\) && steps\.tests\.outcome != 'skipped' \}\}$/m.test(root)) out.push('the root step does not run after a failed normal run');
   const run = root.slice(root.indexOf('        run: |\n'));
+  // The `run: |` block alone: its lines indented under it (what follows
+  // in this text is the next step's comment).
+  const block = /^ {8}run: \|\n((?:(?: {10}.*)?\n)*)/m.exec(root)?.[1].trimEnd() ?? '';
   if (!/^ {10}set -euo pipefail$/m.test(run)) out.push('the root step does not set -euo pipefail');
   if (!/^ {10}sh scripts\/ci\/root-transport-run\.sh run "\$log" \\$/m.test(run)) out.push('the root step does not run the tests through root-transport-run.sh run');
   if (!/^ {10}sh scripts\/ci\/root-transport-run\.sh summarize "\$log" "\$userns" "\$status" "\$list" "\$listed" \|\| status=\$\?$/m.test(run)) out.push('the root step does not call root-transport-run.sh summarize with the run\'s status and the listing');
   // The step's exit is the run's, the listing's (through summarize) and
   // summarize's: its last line, and nothing lets the job pass without it.
-  // The `run: |` block alone: its lines indented under it (what follows
-  // in this text is the next step's comment).
-  const block = /^ {8}run: \|\n((?:(?: {10}.*)?\n)*)/m.exec(root)?.[1].trimEnd() ?? '';
   if (!block.endsWith('\n          exit "$status"')) out.push('the root step does not end with exit "$status"');
   if (/^\s*continue-on-error:/m.test(job)) out.push('the service-nextest job or one of its steps has continue-on-error');
   const gate = jobOf(ci, 'ci-passed');
@@ -1224,6 +1962,22 @@ const problems = (ci) => {
   if (!/^ {4}if: always\(\)$/m.test(gate) || !/RESULTS: \$\{\{ join\(needs\.\*\.result, ' '\) \}\}/.test(gate) || !/success \| skipped\) ;;\n\s*\*\) exit 1 ;;/.test(gate)) out.push('ci-passed does not fail on a needed job that did not succeed');
   if (!/"CARGO_TERM_COLOR=never"/.test(run) || /CARGO_TERM_COLOR=\$/.test(run)) out.push('the root run does not set CARGO_TERM_COLOR=never');
   if (!/^ {12}"\$\{as_root\[@\]\}" cargo nextest run "\$\{selection\[@\]\}" --no-capture \\$/m.test(run)) out.push('the root run is not the selection, as root, with --no-capture');
+  // The run's status goes to `status` and on to summarize, which fails the
+  // step on it: the call, its continuation line, and nothing between it
+  // and the listing.
+  const runCall = [
+    '          status=0',
+    '          sh scripts/ci/root-transport-run.sh run "$log" \\',
+    '            "${as_root[@]}" cargo nextest run "${selection[@]}" --no-capture \\',
+    '            || status=$?',
+    '          listed=0',
+  ].join('\n');
+  if (!block.includes(`\n${runCall}\n`)) out.push('the root run\'s status is not kept by `|| status=$?` on the line after its call');
+  // `status` is set three times: before the run, after it and by
+  // summarize.
+  if ((block.match(/\bstatus=/g) ?? []).length !== 3) out.push('`status` is set elsewhere than before the run, by the run and by summarize');
+  // A trap could replace the step's exit status (`trap 'exit 0' EXIT`).
+  if (/\btrap\b/.test(block)) out.push('the root step\'s run block sets a trap');
   const listCall = [
     '          sh scripts/ci/root-transport-run.sh run "$list_log" \\',
     `            sh -c '${LIST_WRAPPER}' sh "$list" \\`,
@@ -1303,6 +2057,14 @@ describe('the service-nextest job in ci.yml', () => {
       // The step's exit.
       [(b) => b.replace('          exit "$status"\n', '          exit 0\n'), /end with exit "\$status"/],
       [(b) => b.replace('"$list" "$listed" || status=$?', '"$list" "$listed" || true'), /summarize with the run's status/],
+      // The run's own status: dropped, or ignored.
+      [(b) => b.replace('--no-capture \\\n            || status=$?\n', '--no-capture\n'), /kept by `\|\| status=\$\?`/],
+      [(b) => b.replace('--no-capture \\\n            || status=$?\n', '--no-capture \\\n            || true\n'), /kept by `\|\| status=\$\?`/],
+      [(b) => b.replace('--no-capture \\\n            || status=$?\n', '--no-capture \\\n            || status=0\n'), /kept by `\|\| status=\$\?`/],
+      [(b) => b.replace('            || status=$?\n          listed=0\n', '            || status=$?\n          status=0\n          listed=0\n'), /kept by `\|\| status=\$\?`/],
+      [(b) => b.replace(/^( {10}sudo chown .*)$/m, '$1\n          status=0'), /`status` is set elsewhere/],
+      [(b) => b.replace('          set -euo pipefail\n', "          set -euo pipefail\n          trap 'exit 0' EXIT\n"), /sets a trap/],
+      [(b) => b.replace('          exit "$status"\n', '          trap \'status=0\' ERR\n          exit "$status"\n'), /sets a trap/],
       [(b) => b.replace('        id: root\n', '        id: root\n        continue-on-error: true\n'), /continue-on-error/],
       [(b) => b.replace(/^( {4}runs-on: .*)$/m, '$1\n    continue-on-error: true'), /continue-on-error/],
     ];
