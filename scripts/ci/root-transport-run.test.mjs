@@ -125,12 +125,16 @@ describe('summarize', () => {
   const OPERATOR_ROOT = "NOTICE: 20 of 72 socket path cases were NOT run: they need root (an entry of root or of another UID, or a root-owned case root): ancestor_of_another_uid, ancestor_of_root";
   const HARNESS_ROOT = "NOTICE: 23 of 72 socket path cases were NOT bound by the service: socket_in_a_sticky_directory_of_root (an entry of root or of another UID), root_only_socket_in_a_directory_of_root (root's bind for another UID)";
   const HARNESS_PEER = 'NOTICE: 41 of 72 socket path cases were NOT bound by the service: socket_of_root (as root, the peer user)';
+  const OPERATOR_OWNER = 'NOTICE: the owner check needs root: it was NOT tried';
+  const HARNESS_PLATFORM = 'NOTICE: no socket path case was bound by the service: it binds on Linux on x86_64, aarch64 and riscv64 only';
 
   test('a notice that root-only socket path cases did not run fails, each with its own error', () => {
     for (const [notice, pattern] of [
       [OPERATOR_ROOT, 'socket path cases were NOT run: they need root'],
       [HARNESS_ROOT, 'socket path cases were NOT bound by the service'],
       [HARNESS_PEER, 'socket path cases were NOT bound by the service'],
+      [OPERATOR_OWNER, 'the owner check needs root'],
+      [HARNESS_PLATFORM, 'no socket path case was bound by the service'],
     ]) {
       const r = summarize(log(notice));
       assert.equal(r.status, 1, notice);
@@ -150,7 +154,7 @@ describe('summarize', () => {
     for (const notice of [
       'NOTICE: chain_of_40_links: this kernel follows at most 32 symbolic links: expected refused as lookup, not accept',
       'NOTICE: the working directory is too long for a relative socket path that fits once absolute: that half was NOT tried',
-      "NOTICE: /tmp is not root's and sticky: the owner check was NOT tried as a process that is not root",
+      "NOTICE: /tmp is not root's, sticky and writable by all: the shared directory was NOT tried in it",
       PROC,
     ]) {
       const r = summarize(log(notice));
@@ -388,8 +392,10 @@ describe('summarize', () => {
       ['SKYOAUTH_IT_PEER_USER is not set', 'fails'],
       ['socket path cases were NOT run: they need root', 'fails'],
       ['socket path cases were NOT bound by the service', 'fails'],
+      ['the owner check needs root: it was NOT tried', 'fails'],
+      ['no socket path case was bound by the service: it binds on Linux', 'fails'],
       ['this kernel follows at most', 'warns'],
-      ["is not root's and sticky: the owner check was NOT tried", 'warns'],
+      ["is not root's, sticky and writable by all: the shared directory was NOT tried in it", 'warns'],
       ['the working directory is too long for a relative socket path', 'warns'],
       ['/proc/self/fd is missing', 'warns'],
       ['a bind without /proc was NOT tested', 'warns'],
@@ -416,7 +422,13 @@ describe('summarize', () => {
   test('the script documents each notice kind and lists the failing ones in NOTICE_FAILS', () => {
     const source = readFileSync(SCRIPT, 'utf8');
     const fails = /^NOTICE_FAILS='([^']*)'$/m.exec(source)?.[1].split('\n');
-    assert.deepEqual(fails, ['SKYOAUTH_IT_PEER_USER', 'socket path cases were NOT run: they need root', 'socket path cases were NOT bound by the service']);
+    assert.deepEqual(fails, [
+      'SKYOAUTH_IT_PEER_USER',
+      'socket path cases were NOT run: they need root',
+      'the owner check needs root',
+      'socket path cases were NOT bound by the service',
+      'no socket path case was bound by the service',
+    ]);
   });
 });
 

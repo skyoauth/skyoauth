@@ -58,8 +58,9 @@ skyoauth-operator::operator local_path::
 skyoauth-scenarios::pg harness::socket_path_fixture::'
 #
 # The notices that fail the step: the step runs as root with
-# SKYOAUTH_IT_PEER_USER set, so each says that root-only cases did not run
-# although they could have. One string per line, matched as a fixed string:
+# SKYOAUTH_IT_PEER_USER set, on Linux on x86_64 (ubuntu-24.04), so each
+# says that root-only cases did not run although they could have. One
+# string per line, matched as a fixed string:
 #   - `SKYOAUTH_IT_PEER_USER`: any notice naming the variable (the
 #     `local_transport` tests: "SKYOAUTH_IT_PEER_USER is not set: ... was
 #     NOT run").
@@ -67,25 +68,36 @@ skyoauth-scenarios::pg harness::socket_path_fixture::'
 #     `local_path::socket_path_cases_match_check_socket` ("N of M socket
 #     path cases were NOT run: they need root ..."); as root every case
 #     runs.
+#   - `the owner check needs root`: operator
+#     `local_path::the_socket_must_be_the_expected_owners` ("the owner
+#     check needs root: it was NOT tried"); never printed as root.
 #   - `socket path cases were NOT bound by the service`:
 #     `harness::socket_path_fixture::socket_path_fixture_cases_match_the_services_bind`
 #     ("N of M socket path cases were NOT bound by the service: CASE
 #     (REASON), ..."); as root with the peer user every case binds, and
 #     each reason is root or the peer user ("an entry of root or of another
 #     UID", "root's bind for another UID", "as root, the peer user").
+#   - `no socket path case was bound by the service`: the same harness
+#     test ("no socket path case was bound by the service: it binds on
+#     Linux on x86_64, aarch64 and riscv64 only"), printed where the
+#     service does not bind at all; the runner is one where it does, so
+#     here it means none of the cases ran.
 NOTICE_FAILS='SKYOAUTH_IT_PEER_USER
 socket path cases were NOT run: they need root
-socket path cases were NOT bound by the service'
+the owner check needs root
+socket path cases were NOT bound by the service
+no socket path case was bound by the service'
 # Every other notice is a warning, in the summary and as an annotation,
 # and keeps the run from being called complete; these are the ones the
 # selections print for a reason that does not depend on root or on the
 # peer user, so they can show as root too:
 #   - operator `local_path`: "CASE: this kernel follows at most N symbolic
 #     links: expected refused as lookup, not accept" (the case still runs,
-#     against the kernel's limit); "/tmp is not root's and sticky: the owner
-#     check was NOT tried ..." (the machine's /tmp); "the working directory
-#     is too long for a relative socket path that fits once absolute: that
-#     half was NOT tried".
+#     against the kernel's limit); "/tmp is not root's, sticky and
+#     writable by all: the shared directory was NOT tried in it"
+#     (`a_socket_in_the_systems_tmp_is_refused_as_shared`; the machine's
+#     /tmp); "the working directory is too long for a relative socket path
+#     that fits once absolute: that half was NOT tried".
 #   - `local_transport`: "/proc/self/fd is missing ..."; "a bind without
 #     /proc was NOT tested ..." (as root: `unshare` is missing, or the mount
 #     namespace or the mount on /proc was denied); "a user namespace was
