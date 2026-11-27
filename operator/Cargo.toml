@@ -27,7 +27,7 @@ ed25519-dalek = { version = "3.0.0", default-features = false, features = ["zero
 # The SHA-256 of a public identity. The same version and features as the
 # service's.
 sha2 = { version = "0.11.1", default-features = false }
-# Wipes the seed: the copy `SoftwareSigner::from_seed` takes, and the
+# Wipes the seed: the array `SoftwareSigner::from_seed` borrows, and the
 # binary's seed file buffer and decoded seed. Without `alloc` and
 # `derive` (so no `zeroize_derive`): the version `ed25519-dalek` already
 # brings in.
