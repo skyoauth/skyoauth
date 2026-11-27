@@ -109,6 +109,174 @@ describe('caption cues', () => {
   });
 });
 
+// A joined milestone stream (two journeys, docs/proposals/demo-walkthroughs.md
+// 6.3) and the opening lead-in render.mjs puts before it (6.4).
+const JOINED = [
+  r(0, 'chapter', 'M1a-1: First journey'),
+  r(1, 'caption', 'first caption'),
+  r(2, 'command', 'ls'),
+  r(3, 'output', 'x'),
+  r(4, 'caption', 'cut short by the next chapter'),
+  r(5, 'output', 'y'),
+  r(6, 'chapter', 'M1a-2: Second journey'),
+  r(7, 'command', 'pwd'),
+  r(8, 'caption', 'second journey caption'),
+  r(9, 'output', 'z'),
+];
+const OPENING = { type: 'caption', text: 'M1a at commit 0123456789ab' };
+
+describe('chapters: the title card', () => {
+  it('is timed from its title by the caption rule, capped at 3000 ms', () => {
+    assert.equal(timing.TITLE_CARD_MIN_MS, 1200);
+    assert.equal(timing.TITLE_CARD_MAX_MS, 3000);
+    assert.equal(timing.stepDuration(r(0, 'chapter', 'M1a-1: x')), 1200 + 8 * 40);
+    assert.equal(timing.stepDuration(r(0, 'chapter', 'x'.repeat(44))), 2960);
+    assert.equal(timing.stepDuration(r(0, 'chapter', 'x'.repeat(45))), 3000);
+    assert.equal(timing.stepDuration(r(0, 'chapter', 'x'.repeat(46))), 3000);
+    assert.equal(timing.stepDuration(r(0, 'chapter', 'x'.repeat(80))), 3000);
+    // A caption of the same text is not capped at 3000 ms.
+    assert.equal(timing.stepDuration(r(0, 'caption', 'x'.repeat(80))), 4400);
+    assert.equal(timing.stepDuration(r(0, 'chapter', '😀'.repeat(10))), 1200 + 10 * 40);
+  });
+
+  it('is floored at 1200 ms (the caption rule never goes below it)', () => {
+    assert.equal(timing.stepDuration(r(0, 'chapter', '')), 1200);
+    assert.equal(timing.stepDuration(r(0, 'chapter', 'M')), 1240);
+  });
+
+  it('takes its place in the timeline like any step, and shifts no step', () => {
+    const tl = timing.buildTimeline(JOINED);
+    assert.deepEqual(tl.map((e) => e.step), JOINED.map((x) => x.step));
+    assert.equal(tl[6].endMs - tl[6].startMs, timing.stepDuration(JOINED[6]));
+    assert.equal(tl[7].startMs, tl[6].endMs);
+  });
+});
+
+describe('the opening lead-in', () => {
+  it('lasts OPENING_MS whatever its text, before step 0, and moves every later time by OPENING_MS', () => {
+    assert.ok(Number.isSafeInteger(timing.OPENING_MS) && timing.OPENING_MS > 0);
+    const plain = timing.buildTimeline(JOINED);
+    const opened = timing.buildTimeline([OPENING, ...JOINED]);
+    assert.equal(opened.length, plain.length + 1);
+    assert.deepEqual(opened[0], { step: undefined, startMs: 0, endMs: timing.OPENING_MS });
+    plain.forEach((e, i) => {
+      assert.deepEqual(opened[i + 1], { step: e.step, startMs: e.startMs + timing.OPENING_MS, endMs: e.endMs + timing.OPENING_MS });
+    });
+    assert.equal(timing.totalMs(opened), timing.totalMs(plain) + timing.OPENING_MS);
+    for (const text of ['M1a at commit 0123456', 'x'.repeat(100)]) {
+      assert.equal(timing.buildTimeline([{ type: 'caption', text }])[0].endMs, timing.OPENING_MS);
+    }
+    // The typing speed follows the step index, which the opening leaves alone.
+    assert.deepEqual(timing.typingOffsets(JOINED[2]), timing.typingOffsets(r(2, 'command', 'ls')));
+  });
+
+  it('is only the first record, and only a caption: any other record with no step is refused', () => {
+    assert.throws(() => timing.buildTimeline([r(0, 'caption', 'a'), OPENING]), /no step at index 1: only the opening caption/);
+    assert.throws(() => timing.buildTimeline([OPENING, OPENING]), /no step at index 1/);
+    for (const type of ['command', 'output', 'note', 'chapter']) {
+      assert.throws(() => timing.buildTimeline([{ type, text: 'M1a-1: x' }]), /no step at index 0/, type);
+    }
+  });
+});
+
+describe('caption cues with chapters', () => {
+  it('ends a cue at the next caption or the next chapter, whichever starts first; a chapter has no cue', () => {
+    const tl = timing.buildTimeline(JOINED);
+    const total = timing.totalMs(tl);
+    assert.deepEqual(timing.captionCues(JOINED), [
+      { step: 1, startMs: tl[1].startMs, endMs: tl[4].startMs, text: 'first caption' },
+      { step: 4, startMs: tl[4].startMs, endMs: tl[6].startMs, text: 'cut short by the next chapter' },
+      { step: 8, startMs: tl[8].startMs, endMs: total, text: 'second journey caption' },
+    ]);
+  });
+
+  it('ends the opening cue at OPENING_MS when step 0 is output, a command or a note, even with a later caption', () => {
+    for (const type of ['output', 'command', 'note']) {
+      const records = [OPENING, r(0, type, 'ready'), r(1, 'output', 'more')];
+      const tl = timing.buildTimeline(records);
+      assert.ok(timing.totalMs(tl) > timing.OPENING_MS);
+      assert.deepEqual(timing.captionCues(records), [{ step: undefined, startMs: 0, endMs: timing.OPENING_MS, text: OPENING.text }], type);
+      const later = [OPENING, r(0, type, 'ready'), r(1, 'caption', 'late')];
+      const tlLater = timing.buildTimeline(later);
+      assert.deepEqual(
+        timing.captionCues(later).map((c) => [c.step, c.startMs, c.endMs]),
+        [
+          [undefined, 0, timing.OPENING_MS],
+          [1, tlLater[2].startMs, timing.totalMs(tlLater)],
+        ],
+        type,
+      );
+    }
+    assert.deepEqual(timing.captionCues([OPENING]), [{ step: undefined, startMs: 0, endMs: timing.OPENING_MS, text: OPENING.text }]);
+  });
+
+  it('ends the opening cue where a step-0 caption starts, at OPENING_MS', () => {
+    const records = [OPENING, r(0, 'caption', 'a'), r(1, 'output', 'o')];
+    const tl = timing.buildTimeline(records);
+    assert.deepEqual(
+      timing.captionCues(records).map((c) => [c.step, c.startMs, c.endMs]),
+      [
+        [undefined, 0, timing.OPENING_MS],
+        [0, timing.OPENING_MS, timing.totalMs(tl)],
+      ],
+    );
+  });
+
+  it('gives the opening a cue with no step, cut at the first chapter', () => {
+    const tl = timing.buildTimeline([OPENING, ...JOINED]);
+    const cues = timing.captionCues([OPENING, ...JOINED]);
+    assert.deepEqual(cues[0], { step: undefined, startMs: 0, endMs: timing.OPENING_MS, text: OPENING.text });
+    assert.equal(tl[1].startMs, timing.OPENING_MS);
+    assert.deepEqual(cues.slice(1).map((c) => c.step), [1, 4, 8]);
+    assert.equal(cues[2].endMs, tl[7].startMs);
+  });
+
+  it('a chapter after the last caption ends it; a caption after a chapter starts at its own step', () => {
+    const records = [r(0, 'caption', 'a'), r(1, 'chapter', 'M1a-2: b'), r(2, 'output', 'o'), r(3, 'caption', 'c')];
+    const tl = timing.buildTimeline(records);
+    assert.deepEqual(
+      timing.captionCues(records).map((c) => [c.step, c.startMs, c.endMs]),
+      [
+        [0, 0, tl[1].startMs],
+        [3, tl[3].startMs, timing.totalMs(tl)],
+      ],
+    );
+    assert.deepEqual(timing.captionCues([r(0, 'chapter', 'M1a-1: only'), r(1, 'output', 'o')]), []);
+  });
+});
+
+describe('chapter cues', () => {
+  it('has one cue per chapter, numbered from 1, contiguous from 0 to totalMs', () => {
+    const tl = timing.buildTimeline(JOINED);
+    assert.deepEqual(timing.chapterCues(JOINED), [
+      { n: 1, step: 0, startMs: 0, endMs: tl[6].startMs, text: 'M1a-1: First journey' },
+      { n: 2, step: 6, startMs: tl[6].startMs, endMs: timing.totalMs(tl), text: 'M1a-2: Second journey' },
+    ]);
+  });
+
+  it('starts chapter 1 at 0, covering the opening lead-in; the later ones at their chapter record', () => {
+    const records = [OPENING, ...JOINED, r(10, 'chapter', 'M1a-3: Third'), r(11, 'caption', 'third')];
+    const tl = timing.buildTimeline(records);
+    const cues = timing.chapterCues(records);
+    assert.deepEqual(
+      cues.map((c) => [c.n, c.step, c.startMs, c.endMs]),
+      [
+        [1, 0, 0, tl[7].startMs],
+        [2, 6, tl[7].startMs, tl[11].startMs],
+        [3, 10, tl[11].startMs, timing.totalMs(tl)],
+      ],
+    );
+    assert.equal(tl[1].startMs, timing.OPENING_MS);
+    for (let k = 1; k < cues.length; k++) assert.equal(cues[k].startMs, cues[k - 1].endMs);
+  });
+
+  it('is empty without a chapter (the sample transcript)', () => {
+    assert.deepEqual(timing.chapterCues(SAMPLE), []);
+    assert.deepEqual(timing.chapterCues([OPENING, r(0, 'caption', 'a')]), []);
+    assert.deepEqual(timing.chapterCues([]), []);
+  });
+});
+
 describe('the module itself', () => {
   const source = readFileSync(join(HERE, 'timing.js'), 'utf8');
 
@@ -127,5 +295,10 @@ describe('the module itself', () => {
     assert.equal(typeof sandbox.DemoTiming, 'object');
     const inBrowser = JSON.parse(JSON.stringify(sandbox.DemoTiming.buildTimeline(SAMPLE)));
     assert.deepEqual(inBrowser, timing.buildTimeline(SAMPLE));
+    const stream = [OPENING, ...JOINED];
+    for (const f of ['buildTimeline', 'captionCues', 'chapterCues']) {
+      assert.deepEqual(JSON.parse(JSON.stringify(sandbox.DemoTiming[f](stream))), JSON.parse(JSON.stringify(timing[f](stream))), f);
+    }
+    assert.equal(sandbox.DemoTiming.OPENING_MS, timing.OPENING_MS);
   });
 });

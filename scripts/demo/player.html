@@ -59,6 +59,20 @@
   .note { color: #8b949e; font-style: italic; }
   .output { color: #c9d1d9; }
   .cursor { background: #e6edf3; color: #161b22; }
+  /* A chapter's title card: alone in the cleared terminal, centred. */
+  .card {
+    box-sizing: border-box;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 48px;
+    color: #ffffff;
+    text-align: center;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 600 40px/52px "DejaVu Sans", "Liberation Sans", sans-serif;
+  }
   #caption {
     flex: 0 0 112px;
     box-sizing: border-box;
@@ -143,6 +157,21 @@
     line.removeChild(cursor);
   }
 
+  // A chapter (timing.js): clears the terminal and the caption bar and shows
+  // the title until the step's end. The caption bar stays empty until the
+  // next caption record sets it.
+  async function playChapter(record, t0, entry) {
+    var term = byId('term');
+    term.textContent = '';
+    byId('caption').textContent = '';
+    var card = document.createElement('div');
+    card.className = 'card';
+    card.textContent = record.text;
+    term.appendChild(card);
+    await waitUntil(t0, entry.endMs);
+    term.removeChild(card);
+  }
+
   async function playLines(record, base, cls) {
     var lines = T.outputLines(record);
     for (var i = 0; i < lines.length; i++) {
@@ -184,14 +213,24 @@
       var base = t0 + timeline[i].startMs;
       await waitUntil(base, 0);
       events.push({ step: record.step, type: record.type, plannedMs: timeline[i].startMs, actualMs: performance.now() - t0 });
+      // A caption with no step is the opening lead-in (timing.js): shown
+      // like any caption.
       if (record.type === 'caption') {
         byId('caption').textContent = record.text;
+      } else if (record.type === 'chapter') {
+        await playChapter(record, t0, timeline[i]);
       } else if (record.type === 'command') {
         await playCommand(record, base);
       } else {
         await playLines(record, base, record.type);
       }
       await waitUntil(t0, timeline[i].endMs);
+      // The opening's caption ends with its step (timing.js captionCues):
+      // empty the bar unless the next record replaces it at this instant.
+      var next = records[i + 1];
+      if (T.isOpening(record) && !(next && (next.type === 'caption' || next.type === 'chapter'))) {
+        byId('caption').textContent = '';
+      }
     }
     await waitUntil(t0, total);
     window.__demoDone = true;
