@@ -124,8 +124,8 @@ needs each privilege its tests need (PostgreSQL 15 or later):
 ## Operator
 
 `skyoauth-operator` is the workstation library and the command line of the
-same name, which, offline, checks a recovery challenge, signs it with the
-recovery key of a seed file into a new response file (`--out`), and checks
+same name, whose offline commands check a recovery challenge, sign it with
+the recovery key of a seed file into a new response file (`--out`), and check
 the signed response, without a network or a socket. Run it as the seed
 file's owner and never install it setuid or setgid. The commands, the
 artifact formats, the seed file's rules (on Windows its protection is not

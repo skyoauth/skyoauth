@@ -1235,6 +1235,40 @@ fn file_errors_are_exit_3_with_nothing_sent() {
     assert!(fake.finish().is_empty());
 }
 
+/// An artifact one byte over its limit is exit 3, named by its flag and
+/// the limit, with no connection: a response artifact (`preview` and
+/// `status --response`) over 64 KiB, a challenge artifact
+/// (`status --challenge`) over 4 MiB. The limits are written out here, not
+/// taken from the library, so a change of either is seen.
+#[test]
+fn artifacts_over_their_limits_are_exit_3_with_nothing_sent() {
+    const RESPONSE_LIMIT: usize = 64 * 1024;
+    const CHALLENGE_LIMIT: usize = 4 * 1024 * 1024;
+    let fake = Fake::lines(&[golden_reply("previewed")]);
+    let response = fake.dir.file("response", &vec![b'0'; RESPONSE_LIMIT + 1]);
+    let challenge = fake.dir.file("challenge", &vec![b'0'; CHALLENGE_LIMIT + 1]);
+    let cases = [
+        ("preview", "--response", &response, RESPONSE_LIMIT),
+        ("status", "--response", &response, RESPONSE_LIMIT),
+        ("status", "--challenge", &challenge, CHALLENGE_LIMIT),
+    ];
+    for (command, flag, path, limit) in cases {
+        let run = fake.run(command, &path_flag(flag, path));
+        assert_eq!(
+            run,
+            Run {
+                code: 3,
+                stdout: String::new(),
+                stderr: format!(
+                    "skyoauth-operator: {flag}: the file is larger than {limit} bytes\n"
+                ),
+            },
+            "{command} {flag}"
+        );
+    }
+    assert!(fake.finish().is_empty());
+}
+
 /// The defaults of the waits that the help states are the library's.
 #[test]
 fn the_default_waits_are_the_librarys() {

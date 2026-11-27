@@ -99,8 +99,11 @@ the socket's own directory private, the socket owned by --service-uid
 (required) with mode 0600 exactly. --trust-ancestors names the trusted
 UIDs: service-or-root (the default: root and --service-uid) or root-only.
 --total-wait (default 100) and --idle-wait (default 10) are whole seconds
-over zero; the defaults fit a service with its default settings, so a
-command may wait 100 seconds.
+over zero; the defaults fit a service with its default settings. Both
+apply to each request, not to the command: preview sends one request;
+status sends one, or for a restored operation with N revoked IDs
+1 + ceil(N/1000) (at least 2), the pages read once more if N changes
+while they are read. A command may so wait a multiple of --total-wait.
 
 preview sends the response artifact (--response) and prints what its
 restore would enroll. status prints the recovery state, and every member
@@ -203,9 +206,10 @@ pub struct SocketFlags {
     pub service_uid: u32,
     /// `--trust-ancestors`, default `service-or-root`.
     pub trust_ancestors: TrustAncestors,
-    /// `--total-wait`, whole seconds over zero, default 100.
+    /// `--total-wait`, whole seconds over zero, default 100: the total
+    /// limit of each request, not of the command.
     pub total_wait: Duration,
-    /// `--idle-wait`, whole seconds over zero, default 10.
+    /// `--idle-wait`, whole seconds over zero, default 10, of each request.
     pub idle_wait: Duration,
 }
 
@@ -292,10 +296,19 @@ const RECONCILE: &str = "--reconcile";
 const RECOVERY_KEY: &str = "--recovery-key";
 
 /// The defaults of `--total-wait` and `--idle-wait`, in seconds: the
-/// library's `DEFAULT_TOTAL_WAIT` and `DEFAULT_IDLE_WAIT` (Unix only, so
-/// repeated here; `operator/tests/cli/online.rs` checks they agree).
+/// library's `DEFAULT_TOTAL_WAIT` and `DEFAULT_IDLE_WAIT`, which are Unix
+/// only, so repeated here; on Unix the assertions below fail the build when
+/// they disagree, and `the_default_waits_are_the_librarys`
+/// (`operator/tests/cli/online/unix.rs`) checks the help states the
+/// library's.
 const DEFAULT_TOTAL_WAIT_SECONDS: u64 = 100;
 const DEFAULT_IDLE_WAIT_SECONDS: u64 = 10;
+#[cfg(unix)]
+const _: () =
+    assert!(DEFAULT_TOTAL_WAIT_SECONDS == skyoauth_operator::local::DEFAULT_TOTAL_WAIT.as_secs());
+#[cfg(unix)]
+const _: () =
+    assert!(DEFAULT_IDLE_WAIT_SECONDS == skyoauth_operator::local::DEFAULT_IDLE_WAIT.as_secs());
 
 /// The flags of each command.
 const VERIFY_CHALLENGE_FLAGS: [&str; 7] = [

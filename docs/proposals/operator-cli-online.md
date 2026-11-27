@@ -6,10 +6,10 @@ extends [the offline command line](operator-cli-artifacts.md) (D1) with the
 commands that talk to the service's deployment-local transport. "D2" here
 names this slice of the operator command line, not the entry "D2 names" of
 [tasks §13](../skyoauth-tasks.md#13-m1a-lead-decisions-2026-11-24).
-It depends on C4 (`LocalClient::status`, `RestoreVerdict`,
+It builds on C4 (`LocalClient::status`, `RestoreVerdict`,
 `BootstrapVerdict`, `StatusRequest::reconciling_*`,
 `LocalClient::revoked_credential_ids` and the "Reconciling" section of
-`operator/src/local/mod.rs`), which is in pull request #211, not yet on `main` at `a157d68`.
+`operator/src/local/mod.rs`), merged to `main` with pull request #211.
 
 ## Who decided what
 
@@ -124,7 +124,13 @@ SocketExpectations, Timeouts)` and checks the path before every connect
   the fixture's `default_limits`: deadline 30, transaction timeout 60,
   idle 10). They fit a server with the default settings only; a server
   tuned otherwise needs both set to match, since the transport cannot
-  report its settings. A command can therefore block for 100 seconds.
+  report its settings. Both limits apply to each request, not to the
+  command: `preview` sends one request; `status` sends one, and for a
+  restored operation also the walk of its revoked IDs, `1 + ceil(N/1000)`
+  requests in all (at least 2) for `N` revoked IDs, with the pages walked
+  once more if `N` changes during the walk (the documented tie). A command
+  can therefore block for a multiple of `--total-wait`, 100 seconds by
+  default.
 
 ### `bootstrap`
 
@@ -405,8 +411,8 @@ before the request is sent, and the output rules.
 ## Not verified
 
 - Nothing was built or run for this proposal but the docs check.
-- C4's API is read from pull request #211 at
-  `4ef4fa0`; its names may change before it merges.
+- C4's API was read from pull request #211 at `4ef4fa0`, before it
+  merged; the commands of slice 1 are built against the merged API.
 - That `CARGO_BIN_EXE_<name>` is set only for the binary's own package:
   from Cargo's documentation as remembered, not tried.
 - That the reply parser accepts exactly one byte form per reply (Q6): from
