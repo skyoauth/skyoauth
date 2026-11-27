@@ -1,9 +1,9 @@
 # Proposal: a `status` operation on the local socket that changes no row, and a bound on the restore reply
 
 Status: Reviewed; rulings applied (the lead, 2026-11-27): the design holds
-(A1 `status`, B2 an exact count with a capped list, the `FOR SHARE`
-barrier), review findings F1 to F11 are applied, and Q1 to Q8 are ruled
-(see "Rulings"). F4 widens what a local peer reads: lead scoping, user
+(A1 `status`, B2 a count with a capped list, exact absent a tie, the
+`FOR SHARE` barrier), review findings F1 to F11 and the third-round items
+(a) to (h) are applied, and Q1 to Q8 are ruled (see "Rulings"). F4 widens what a local peer reads: lead scoping, user
 informed. Not implemented: this text changes no code, no contract, no
 fixture and no test. It answers two rulings of the user (2026-11-27,
 relayed by the lead), recorded in tasks §13 under "Other rulings of the
@@ -131,6 +131,7 @@ The type notation is the fixture's, with `|null` for a nullable member
 | `revoked_credential_ids` | `string_list\|null` | when `restored`: the next page of them, in byte order, after `revoked_after` |
 | `enrolled_state` | `string\|null` | null when no `credential_spki` was asked; else `not_found`, `enabled`, `disabled` or `revoked`, for the credential with that public identity |
 | `enrolled_admin_id`, `enrolled_credential_id` | `string\|null` | that credential's operator and ID, when found |
+| `enrolled_trust_anchor_sha256` | `hex\|null` | when found: SHA-256 of that credential's stored `trust_anchor_ref` (its UTF-8 bytes), computed at read time; the table stores the reference, not a digest (`0005_operator.sql:130-138`), and `sha2` is already a service dependency (`service/Cargo.toml:19`) (lead ruling, (b)) |
 
 A `RecoveryState` row whose `bootstrap_closed` is false still counts as
 closed (identity-registry :298-299), so `instance_id` and the other state
@@ -182,7 +183,8 @@ recovery challenge: an approval or a pending gated write by that ID is
 `not_found`, the same as no row.
 
 It reveals the recovery state with the current recovery public key, a
-challenge's state, and whether an mTLS key is enrolled. All of it is
+challenge's state, whether an mTLS key is enrolled, and the SHA-256 of
+that credential's trust anchor reference (b). All of it is
 public data, read by a peer that is already the service UID or root with
 the database's rights (`mod.rs:448-461`; OQ-TM-9). `issue_challenge`
 already reads the state to build its plan (`ops.rs:416-420`), and an issue
@@ -194,10 +196,14 @@ do not name the operation (`recovery.rs:226-229`; identity-registry
 
 **Where the read lives (lead ruling, Q1).** One registry function in
 `recovery.rs`, beside the restore's step-3 filter, returns the closed
-enum of states and the projection above, never the row. This amends the
-lead ruling "No registry getter returns the operation row"
-(identity-registry :358-359; `recovery.rs:165-166`); the proposed wording is
-contract amendment 2 below.
+enum of states and the projection above, never the row. The guarantee
+"no registry getter returns the operation row" (identity-registry
+:358-359; `recovery.rs:165-166`) is scoped to this projection (lead
+ruling, (g)): the existing getter `get_administrative_operation`
+(`service/src/persistence/registry/operation.rs:448-463`, public through
+`registry/mod.rs:527`) already returns the full row of whatever kinds its
+caller names, so the ruling's literal text is wider than the code. The
+proposed wording is contract amendment 2 below.
 
 ### Transaction, locks and the barrier
 
@@ -235,8 +241,9 @@ contract amendment 2 below.
   then locked a credential would close a cycle; the reviewer reproduced it
   as a deadlock (`40P01`).
 - **One statement (F6).** The state, the challenge row, the credential by
-  public identity, the count and the revoked page are read in one
-  statement, one snapshot. `server_time` is read from the clock after the
+  public identity (with its trust anchor reference, hashed after the read),
+  the count and the revoked page are read in one statement, one
+  snapshot. `server_time` is read from the clock after the
   barrier and before that statement (F3).
 
 ### Finality, the 100 s wait, and the reconcile procedure
@@ -261,17 +268,27 @@ client still never retries on its own (`operator/src/local/mod.rs:75`):
   corrects itself: if the old challenge is restored after all, it rotates
   the epoch, so the new one's restore is `not_restorable` and `status` on
   the old one shows `restored`.
-- **bootstrap, outcome unknown (lead ruling, F4):** `status` with the
-  bootstrap's `credential_spki`, the same DER bytes it sent.
-  - `instance_id` equal to the one sent, `enrolled_state` not `not_found`,
-    and `recovery_public_key` equal to the one sent: it committed
-    (`enrolled_admin_id`, `enrolled_credential_id`; no binding ID, Q8).
-  - `instance_id` equal and the recovery key different: the recovery key
-    the operator holds cannot restore this instance; stop.
+  **After any retry (lead ruling, (c)):** a `conflict` from the new issue
+  (a late restore has enrolled the replacement's key, `ops.rs:421-432`) or
+  a `not_restorable` from the repeated or new restore means: query the
+  **original** `operation_id` again and act on the state it reports. A
+  late restore can commit after `expired` was seen.
+- **bootstrap, outcome unknown (lead rulings, F4 and (b)):** `status` with
+  the bootstrap's `credential_spki`, the same DER bytes it sent.
+  - `instance_id`, `recovery_public_key`, the mTLS key (`enrolled_state`
+    not `not_found`) and `enrolled_trust_anchor_sha256` all equal what was
+    sent (the client hashes the `trust_anchor_ref` it sent): **the current
+    state matches** the request (`enrolled_admin_id`,
+    `enrolled_credential_id`; no binding ID, Q8). Which request won no
+    longer matters: the effects are identical.
   - `instance_id` null: repeat the same bootstrap, which the database
     closes once (`mod.rs:313-317`).
-  - another `instance_id`, or the mTLS key not enrolled: another bootstrap
-    won; stop.
+  - anything else (another instance, another recovery key, the mTLS key
+    not enrolled, another trust anchor): the current state does not match;
+    do not claim the bootstrap committed, and stop. With an equal instance
+    and another recovery key, the recovery key the operator holds cannot
+    restore this instance. The historical outcome of the differing request
+    is not reconstructible from the state.
 - **issue_challenge, outcome unknown:** no reconcile possible: issue
   again. A stray challenge expires unused and any restore retires the
   others (`mod.rs:399-404`). `Op::retry` stays `Retry::ReconcileFirst` for
@@ -315,7 +332,8 @@ M9).
 - For a given database state and clock, the reply bytes are fixed:
   members in a fixed order, `null` for absent values, revoked IDs in byte
   order (`ORDER BY id COLLATE "C"`, matching Rust's byte-wise `String`
-  order), each page exactly `min(page size, count - held)` IDs. With the
+  order), each page exactly `min(page size, count - held)` IDs (absent a
+  tie, Part B). With the
   fixture's fixed clock and `SequentialIds` the golden lines are
   reproducible as today's are.
 - The wire has no version member; an old server answers an unknown `op`
@@ -332,7 +350,7 @@ M9).
 | Option | Reply | Trade-offs |
 | ------ | ----- | ---------- |
 | B1. Count only | `revoked_credential_count`; no IDs | Smallest; every reply needs a `status` call to see any ID. |
-| **B2. Count and capped list** (ruled) | `revoked_credential_count` (exact), and `revoked_credential_ids`: the first `min(count, 1000)` in byte order | The usual reply (well under 1000 operators, inferred) stays complete in one line; the rest pages through `status`. |
+| **B2. Count and capped list** (ruled) | `revoked_credential_count` (exact absent a tie, below), and `revoked_credential_ids`: the first `min(count, 1000)` in byte order | The usual reply (well under 1000 operators, inferred) stays complete in one line; the rest pages through `status`. |
 | B3. Paginated restore | The restore returns a page and a cursor | A restore runs once; its later pages need a read, which is B2 with `status`. |
 
 New `restore` reply, members in this order:
@@ -366,7 +384,7 @@ constant in the service, pinned in the fixture as
   database allows 8192 bytes, `0005_operator.sql:200-202`) and three more
   IDs (`instance_id` and the two `enrolled_` IDs): about 1,559,065 bytes at
   its worst, 37.2% (the reviewer's figure; the author's estimate is within
-  a few bytes).
+  a few bytes), plus about 100 bytes for `enrolled_trust_anchor_sha256`.
 - 1000 is round and far above any plausible number of operator credentials
   (inferred).
 
@@ -379,8 +397,10 @@ the open question: the service now bounds every reply.
 The restore writes `revoked_at` and the challenge's `consumed_at` from the
 same `now`: `restore_operator` computes it once (`recovery.rs:1488`) and
 `restore_steps` binds it to the consume (`CONSUME_CHALLENGE`, :580-581) and
-to the revocation (:1548-1549). The credentials a restore revoked are
-therefore those whose `revoked_at` equals the operation's `consumed_at`.
+to the revocation (:1548-1549). The list is therefore the credentials whose
+`revoked_at` equals the operation's `consumed_at`: **membership is by
+timestamp** (lead ruling, (a)), not by a record of which restore revoked
+which credential.
 
 The registry function of Q1 computes the count and a page with that
 predicate. The restore reply takes its count and first page from it too,
@@ -390,15 +410,31 @@ statement's list: a plain statement in the restore's transaction, inside
 returns. No barrier on this path. A failure of it rolls the restore back:
 `auth_unavailable` (or `server_error`, by the store-failure mapping of
 `mod.rs:436-441`), an `UncertainCommit` at the client, and `status` then
-shows `issued` (or `expiring` or `expired` once the time has passed). So the restore reply and `status` agree by construction.
+shows `issued` (or `expiring` or `expired` once the time has passed),
+assuming no other restore commits before the client polls; if one does,
+`status` shows `retired` (lead ruling, (d)). So the restore reply and
+`status` agree by construction, absent a tie.
 
-The predicate also lists a credential that another writer revoked at the
-identical microsecond, before the restore locked the credentials
-(over-inclusion only; `revoke_admin_credential`, `operator.rs:727-745`, has
-no online caller yet; inferred). Both sources include it alike. A later
-revocation at the same microsecond makes `status`'s count exceed the
-reply's; the client restarts the walk from `status` alone. No column
-records the revoking operation (lead ruling, Q4: no schema change).
+**Ties.** A tie between two restores needs a clock that repeats a
+microsecond (a fixed test clock, or a clock stepped back): two restores
+need two signed challenges, and the second can only be issued at the epoch
+the first one's commit created (a challenge of the earlier epoch is
+`retired` once the first commits), so in normal operation its `now` is
+later. On a tie, `status`'s list may include the other restore's
+credentials. A revocation by another writer at the identical microsecond
+is listed too (`revoke_admin_credential`, `operator.rs:727-745`, has no
+online caller yet; inferred). Over-inclusion only. A revocation at the
+same microsecond after the restore makes `status`'s count exceed the
+reply's, or change between two pages; the client restarts the walk from
+`status` alone. The count is exact and the pages stable **absent a tie**.
+
+**Per-restore membership: recorded as an option, not built** (lead ruling,
+(a) and Q4). A column naming the revoking operation on `admin_credential`,
+added by an in-place, pre-beta amendment of `0005`, would make membership
+exact. It has the shape of the nonce ruling of the recovery proposal
+("recorded as an option, not built",
+`docs/proposals/recovery-verified-response.md:441-443`; the user,
+2026-11-24, `docs/threat-model.md:926-929`).
 
 ### Atomicity and audit
 
@@ -441,24 +477,28 @@ fixture pins (F9).
    >   IDs and the credentials the restoration revoked, a bounded number at
    >   a time (the transport's page size, pinned by the wire fixture); and,
    >   for a named mTLS key, whether a credential with its public identity
-   >   exists, its operator and its state. It returns no challenge, no plan
-   >   member other than the replacement's IDs, no digest, hash or
-   >   signature, and does not distinguish another kind of operation from a
-   >   missing one. A challenge reported expired is not final (see
+   >   exists, its operator, its state and the SHA-256 of its trust anchor
+   >   reference. It returns no challenge, no plan member other than the
+   >   replacement's IDs, no request digest, challenge hash or signature,
+   >   and does not distinguish another kind of operation from a missing
+   >   one. A challenge reported expired is not final (see
    >   "Challenge TTL and time"). It is the reconcile step of the
    >   uncertain-commit rule above.
 
-2. **identity-registry :358-359**, the lead ruling, replaced: "No registry
-   getter returns the operation row (lead ruling); one registry function,
-   beside the restoration's own check of the row, returns only the closed
-   state of a recovery challenge and the projection of 'Reading the
-   recovery state' (lead ruling, 2026-11-27)."
+2. **identity-registry :358-359**, the lead ruling, replaced (scoped per
+   (g)): "The recovery read never returns the operation row: one registry
+   function, beside the restoration's own check of the row, returns only
+   the closed state of a recovery challenge and the projection of 'Reading
+   the recovery state' (lead ruling, 2026-11-27). The getter of
+   administrative operations returns the full row of the kinds its caller
+   names." Today's text is wider than the code (above).
 3. **identity-registry "Restoration" (:370-381)**, appended: "The local
    transport's reply carries the number of revoked credentials and a
    bounded number of their IDs (the transport's page size, pinned by the
    wire fixture), the first in byte order; `status` returns the rest. Both
    select the credentials whose `revoked_at` equals the operation's
-   `consumed_at`."
+   `consumed_at`: membership is by timestamp, so a clock that repeats a
+   microsecond can add another revocation's credentials."
 4. **public-api §1, the Local row (:40)**, its third column: "Local
    command or Unix socket (peer UID check); the recovery restoration also
    needs the independent signed proof" (F9).
@@ -491,23 +531,33 @@ pins them.
 
 ### Operator (`operator/src/local/`)
 
-- **C1 codec** (`wire.rs`): encode `status` with `null` (the encoder writes
-  strings only today, :44-88); parse its reply (the reader has no `null`
-  yet, :278-443); parse the new `restored` member. Checks, each failure
-  `Malformed`, an unknown outcome (lead ruling, F8):
-  - a `restored` reply: exactly `min(count, page size)` IDs, strictly
-    increasing in byte order;
-  - a `status` page: exactly `min(page size, count - held)` IDs, each
-    greater than `revoked_after`, strictly increasing, and the same count
-    on every page of one walk (the client holds the first count it saw).
+- **With the fixture (lead ruling, (f)):** `Op::Status` and every
+  exhaustive match on `Op` (`Op::ALL`, `as_str`, `Op::retry` with
+  `Retry::Safe`, the encoder and `parse_reply`), and the write test at
+  `exchange.rs:469` turned into an explicit list of the three writes.
+  `operator/tests/local_wire/mod.rs:267` requires the fixture's `ops` to
+  equal `Op::ALL`, so these land in the PR that changes the fixture.
+- **C1 codec, the reply parser** (`wire.rs`): encode `status` with `null`
+  (the encoder writes strings only today, :44-88); parse its reply (the
+  reader has no `null` yet, :278-443) and the new `restored` member. It
+  checks shape and in-page order only (lead rulings, F8 and (e)): the
+  members, their types and `null`s, a list of at most the page size, IDs
+  strictly increasing in byte order; a failure is `Malformed`, an unknown
+  outcome.
+- **The page iterator** (C4), which has the request and page history,
+  checks the rest (lead ruling, (e)): the restore reply's list has
+  `min(count, page size)` IDs; each `status` page has exactly
+  `min(page size, count - held)`, each greater than the `revoked_after` it
+  sent; the count is the same on every page of one walk. A `status` count
+  above the restore reply's, or one that changes between pages, is the
+  documented tie: restart the walk from `status` alone, once; anything
+  else is an unknown outcome.
 - **C4** (the operator slice that uses the socket end to end; its scope is
   not recorded in the repository, `docs/proposals/demo-walkthroughs.md:360`;
-  not verified): `Op::Status` with `Retry::Safe`; `issue_challenge` stays
-  `Retry::ReconcileFirst`, documented as "no reconcile possible: issue
-  again" (Q5); the write test at `exchange.rs:469` becomes an explicit list
-  of the three writes; `LocalClient::status`, a page iterator for the
-  revoked IDs, and the reconcile procedure above in the docs, replacing
-  `exchange.rs:306-309`.
+  not verified): `LocalClient::status`, the page iterator, and the
+  reconcile procedure above in the docs, replacing `exchange.rs:306-309`;
+  `issue_challenge` stays `Retry::ReconcileFirst`, documented as "no
+  reconcile possible: issue again" (Q5).
 
 ## Tests
 
@@ -520,11 +570,18 @@ shape in the `|null` notation and the new `restored` shape; golden requests
 (all keys null; an operation ID; a `credential_spki`; with
 `revoked_after`); the `exchange` steps regenerated with a `status` after
 `bootstrap` (instance, key, mTLS key enrolled) and after `restore`
-(`restored`, IDs, count 1); `unknown_replies`: a `status` reply missing a
-member, a string where `null` belongs, a `restored` reply whose list is
-longer than its count, unsorted, shorter than `min(count, 1000)`, or
-longer than 1000 when the count is larger; a
-`status` page with an ID not after `revoked_after`.
+(`restored`, IDs, count 1), with a note that `enrolled_trust_anchor_sha256`
+is the SHA-256 of the `trust_anchor_ref` sent; `unknown_replies` (the
+reply parser's checks, (e)): a `status` reply missing a member, a string
+where `null` belongs, a list longer than 1000, an unsorted or repeated
+list, in a `restored` and in a `status` reply.
+
+**Operator page iterator (C4's unit tests, (e)):** a `restored` list
+longer or shorter than `min(count, page size)`; a `status` page shorter or
+longer than `min(page size, count - held)`; an ID not after the
+`revoked_after` sent; a count that changes between `status` pages
+(restart once, then unknown); a `status` count above the restore reply's
+(restart from `status` alone).
 
 **Service (`service/tests/local_transport.rs`, the PR's own):**
 
@@ -534,17 +591,25 @@ longer than 1000 when the count is larger; a
   `expires_at` and past `settles_at`; `retired` (restore another
   challenge); `restored` with the replacement's IDs;
 - restore, then revoke the consumed challenge row: `restored` (F1);
+- revoke an unconsumed challenge (raw SQL, with its revocation operation
+  row, `0005_operator.sql:281-312`): `revoked`, and its restore is
+  `not_restorable` (h);
 - an unclosed state row (`bootstrap_closed` false, written by raw SQL):
   `instance_id` reported, an `operation_id` asked is `server_error` (F10);
-- bootstrap reconcile: before bootstrap (all null); after it (instance,
-  key, `enabled`); the same with a different recovery key in the request
-  (keys differ); after the restore (old mTLS key `revoked`);
+- bootstrap reconcile (b): before bootstrap (all null); after it (the
+  instance, recovery key, mTLS key and trust-anchor digest all match);
+  compared against a different recovery key and against a different
+  `trust_anchor_ref` (no match); after the restore (old mTLS key
+  `revoked`, still found);
 - 999, 1000, 1001 and 2001 credentials: the restore reply's count and first
   page, then pages via `revoked_after` that join to the full set without
   repeats; the clock advanced between restores, so one restore's set never
-  includes another's (F5); and the tie pinned: a credential revoked at the
-  restore's own microsecond before it is listed by both the reply and
-  `status`;
+  includes another's (F5); and the ties pinned with a fixed clock: a
+  credential revoked at the restore's own microsecond before it is listed
+  by both the reply and `status`; a credential revoked at that microsecond
+  between two `status` pages raises the count on the second page, and the
+  documented result is the walk restarted from `status` alone, listing it
+  (a);
 - `status` changes no row (row counts and the audit head unchanged);
 - the barrier: `status` waits for a restore blocked before its commit and
   then sees `restored`, and sees `issued` after a rollback (as A32's
@@ -552,6 +617,9 @@ longer than 1000 when the count is larger; a
 - no cycle (F2): a test transaction holds the state row; a restore blocks
   at step 2 holding the credential locks; `status` runs meanwhile; on
   release all three end without `40P01`;
+- no credential lock (M13, (h)): a test transaction holds one credential
+  row `FOR NO KEY UPDATE` with the state row free; `status` completes
+  before that credential is released;
 - `server_time` after the barrier (F3): a clock that steps on each read,
   with `status` held at the barrier;
 - request refusals of the table above; a unit test that a `Reply::Restored`
@@ -572,17 +640,19 @@ longer than 1000 when the count is larger; a
 - M9 (C4) `status` classed as a write, so a store failure becomes
   `UncertainCommit`;
 - M10 the replacement's IDs returned for `issued`;
-- M11 (C1) a `restored` list longer than its count accepted;
+- M11 (iterator) a `restored` list longer than its count accepted;
 - M12 `revoked` tested before `restored` (the restore-then-revoke test);
-- M13 a credential read `FOR SHARE` after the barrier (the no-cycle test,
-  `40P01`);
+- M13 a credential read `FOR SHARE` after the barrier (the no-credential-lock
+  test, which then waits; and the no-cycle test, `40P01`);
 - M14 the barrier not released before the read (no `ROLLBACK TO SAVEPOINT`):
   killed only by a test that inspects `pg_locks` from a second session
   while `status` is held after the barrier, which needs a test hook
   (inferred; may stay a surviving mutant);
 - M15 `server_time` read before the barrier (the stepping-clock test);
 - M16 the restore reply's count from the revoke statement instead of the
-  predicate (the pinned-tie test).
+  predicate (the pinned-tie test);
+- M17 (b) `enrolled_trust_anchor_sha256` over another value, or left out of
+  the client's match (the different-anchor test).
 
 A32's scenario tests (`tests/security/a32.rs`) are the test session's;
 reconcile cases there would add test IDs to `scenarios.toml`, which
@@ -592,14 +662,16 @@ reconcile cases there would add test IDs to `scenarios.toml`, which
 
 1. **Contract amendment** (the lead's): the five texts above, with or
    before PR 2.
-2. **Service PR:** the registry function, `status`, the restore cap, module
-   docs, the fixture, and the matching C1 codec change in
-   `operator/src/local/wire.rs`. The codec lands here because both crates
-   check the same fixture: a fixture change alone turns
-   `operator/tests/local_wire` red.
-3. **Operator C4 PR:** `LocalClient::status`, `Op::Status` and its retry
-   class, the explicit write list, the revoked-ID pages and the reconcile
-   docs.
+2. **Service PR, with the shared fixture and the codec:** the registry
+   function, `status`, the restore cap, module docs, the fixture, and on
+   the operator side `Op::Status` with every exhaustive match on `Op`
+   (`Op::retry` included, `Retry::Safe`), the explicit write list at
+   `exchange.rs:469`, and the C1 encoder and reply parser. Both crates
+   check the same fixture, and `operator/tests/local_wire/mod.rs:267`
+   requires its `ops` to equal `Op::ALL`, so none of this can land alone
+   (lead ruling, (f)).
+3. **Operator C4 PR:** `LocalClient::status`, the page iterator and its
+   checks, and the reconcile procedure in the docs.
 
 ## Not verified
 
@@ -618,7 +690,9 @@ reconcile cases there would add test IDs to `scenarios.toml`, which
 - The size figures: computed from the fixture's golden line and from
   `serde_json`'s escape rules (as `operator/src/local/wire.rs:162-185`
   restates them), not by serializing 1000 IDs.
-- That no online path revokes a credential yet (the tie of Part B).
+- That no online path revokes a credential yet (the tie of Part B); that
+  two restores cannot share a `now` without a repeating clock rests on
+  reading the code (the `retired` rule), not on a test.
 - C4's scope.
 
 ## Rulings
@@ -626,8 +700,18 @@ reconcile cases there would add test IDs to `scenarios.toml`, which
 All by the lead, 2026-11-27, on review of this proposal; the two rulings it
 answers are the user's (see the status line).
 
-- **Design:** A1 `status`, B2 (an exact count and a capped list), the
-  `FOR SHARE` barrier. Findings F1 to F11 applied as written above.
+- **Design:** A1 `status`, B2 (a count and a capped list, exact absent a
+  tie), the `FOR SHARE` barrier. Findings F1 to F11 applied as written
+  above.
+- **Third round, (a) to (h):** membership by timestamp, ties only with a
+  repeating clock, per-restore membership recorded as an option, not built
+  (a); the trust-anchor digest and "the current state matches" (b); query
+  the original `operation_id` after a `conflict` or `not_restorable` (c);
+  the failed page query's outcomes assume no other restore commits first
+  (d); the parser checks shape and in-page order, the iterator the rest
+  (e); `Op::Status` with the fixture PR (f); the getter guarantee scoped
+  to the `status` projection (g); the M13 and unconsumed-revoked tests
+  (h).
 - **F4 (lead scoping, user informed):** `recovery_public_key` in the reply
   and the bootstrap reconcile rule.
 - **Q1:** a registry function in `recovery.rs` returning a closed enum,
@@ -637,7 +721,7 @@ answers are the user's (see the status line).
 - **Q3:** `expired` stays, with the transaction-timeout margin
   (`settles_at`); it is not final (identity-registry :426-429).
 - **Q4:** no column, no schema change; one predicate for the reply and
-  `status` (F5).
+  `status` (F5); the column is recorded as an option, not built (a).
 - **Q5:** `issue_challenge` stays `Retry::ReconcileFirst` (it writes a row
   and an audit event), documented as "no reconcile possible: issue again";
   `status` is `Retry::Safe`.
