@@ -35,8 +35,10 @@
 //!   `default_limits`), and `Debug` and `Display` show no value.
 //!
 //! Unix only, like the module. Each wait of a test is bounded
-//! ([`TEST_WAIT`]); no test polls: a fake server that must outlast the
-//! call blocks until the call has returned. What only Linux does is
+//! ([`TEST_WAIT`]), the fake servers' accepts included
+//! ([`accept_within`], the one poll); a fake server that must outlast the
+//! call blocks until the call has returned. A lower bound on a call's
+//! duration allows [`EARLY`]. What only Linux does is
 //! checked on Linux alone: the kind of a lost connection, a reset when a
 //! server closes with bytes unread (macOS reads the end of the stream
 //! instead), and a queued connection still readable after its client has
@@ -237,6 +239,42 @@ impl Accepted {
     }
 }
 
+/// The early end a timed wait may have (a socket timeout rounded down by
+/// the system, say): a lower bound on how long a call took allows it.
+const EARLY: Duration = Duration::from_millis(25);
+
+/// Whether `took` is `bound` at least, but for [`EARLY`].
+fn at_least(took: Duration, bound: Duration) -> bool {
+    took + EARLY >= bound
+}
+
+/// The first connection to `listener`, accepted within [`TEST_WAIT`] or
+/// the test fails: a client that never connects fails the test instead of
+/// hanging it. The one poll of these tests: the listener does not block,
+/// and is retried every millisecond until then. The connection returned
+/// blocks.
+fn accept_within(listener: &UnixListener) -> UnixStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + TEST_WAIT;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // Inherited from the listener on macOS, not on Linux.
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "no connection within the test wait"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(err) => panic!("accept: {err}"),
+        }
+    }
+}
+
 /// Calls `request` with `timeouts` against a fake server that runs `serve`
 /// on the first connection it accepts. Checks that the client connected
 /// exactly once, joins the server (its failed assertions fail the test)
@@ -252,7 +290,7 @@ fn against(
     let line = request.encode().unwrap().as_bytes().to_vec();
     let (done, returned) = mpsc::channel::<()>();
     let server = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        let stream = accept_within(&listener);
         stream.set_read_timeout(Some(TEST_WAIT)).unwrap();
         stream.set_write_timeout(Some(TEST_WAIT)).unwrap();
         serve(Accepted {
@@ -577,7 +615,7 @@ fn a_failed_write_still_reads_the_reply() {
         let (closed, closed_receiver) = mpsc::channel();
         let sent = reply.clone();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_within(&listener);
             stream.write_all(&sent).unwrap();
             drop(stream);
             closed.send(()).unwrap();
@@ -638,7 +676,7 @@ fn a_reply_later_than_the_total_is_unknown() {
         let _ = accepted.stream.write_all(&reply);
     });
     assert_eq!(outcome, Err(CallError::Unknown(UnknownOutcome::TimedOut)));
-    assert!(took >= timeouts.total, "{took:?}");
+    assert!(at_least(took, timeouts.total), "{took:?}");
     assert!(took < TEST_WAIT / 2, "{took:?}");
 }
 
@@ -657,7 +695,7 @@ fn a_reply_that_stalls_is_unknown_at_the_idle_timeout() {
         accepted.wait_for_the_call();
     });
     assert_eq!(outcome, Err(CallError::Unknown(UnknownOutcome::TimedOut)));
-    assert!(took >= timeouts.idle, "{took:?}");
+    assert!(at_least(took, timeouts.idle), "{took:?}");
     assert!(took < TEST_WAIT / 2, "{took:?}");
 }
 
@@ -713,14 +751,17 @@ fn a_listener_that_never_accepts_is_unknown() {
     let outcome = call(&client, &request(Op::Bootstrap));
     let took = start.elapsed();
     assert_eq!(outcome, Err(CallError::Unknown(UnknownOutcome::TimedOut)));
-    assert!(took >= timeouts.total && took < TEST_WAIT / 2, "{took:?}");
+    assert!(
+        at_least(took, timeouts.total) && took < TEST_WAIT / 2,
+        "{took:?}"
+    );
     assert_eq!(connects.load(Ordering::SeqCst), 1);
     // The queued connection holds the whole request line, then its end. On
     // Linux only: by now the call's thread may have dropped its end, and
     // macOS then refuses the options of the queued socket (`EINVAL`), and
     // may refuse its accept.
     if cfg!(target_os = "linux") {
-        let (mut queued, _) = listener.accept().unwrap();
+        let mut queued = accept_within(&listener);
         queued.set_read_timeout(Some(TEST_WAIT)).unwrap();
         read_request(
             &mut queued,
@@ -860,21 +901,29 @@ impl Connector for Stalled {
 fn a_write_that_times_out_is_unknown() {
     let client = LocalClient::with_connector(Stalled, PATIENT);
     for op in Op::ALL {
+        let start = Instant::now();
         assert_eq!(
             call(&client, &request(op)),
             Err(CallError::Unknown(UnknownOutcome::TimedOut)),
             "{op:?}"
         );
+        // At the stream's own timeout, not retried until the total.
+        assert!(start.elapsed() < TEST_WAIT / 2, "{op:?}");
     }
 }
 
-/// What a [`Scripted`] stream saw: the bytes written to it, how many bytes
-/// were read from it, and whether it was flushed and its write half ended
-/// (asked to, failing or not).
+/// What a [`Scripted`] stream saw: the bytes written to it and the length
+/// of each write's offer, how many bytes were read from it and how many
+/// reads, each wait set (read and write, failing or not), and whether it
+/// was flushed and its write half ended (asked to, failing or not).
 #[derive(Debug, Default, Clone)]
 struct Seen {
     written: Vec<u8>,
+    offers: Vec<usize>,
     read: usize,
+    reads: usize,
+    read_waits: Vec<Option<Duration>>,
+    write_waits: Vec<Option<Duration>>,
     flushed: bool,
     closed: bool,
 }
@@ -936,6 +985,7 @@ impl io::Read for Scripted {
         let read = rest.len().min(buf.len()).min(self.plan.per_read);
         buf[..read].copy_from_slice(&rest[..read]);
         seen.read += read;
+        seen.reads += 1;
         Ok(read)
     }
 }
@@ -944,11 +994,9 @@ impl io::Write for Scripted {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         thread::sleep(self.plan.write_delay);
         let taken = buf.len().min(self.plan.per_write);
-        self.seen
-            .lock()
-            .unwrap()
-            .written
-            .extend_from_slice(&buf[..taken]);
+        let mut seen = self.seen.lock().unwrap();
+        seen.offers.push(buf.len());
+        seen.written.extend_from_slice(&buf[..taken]);
         Ok(taken)
     }
 
@@ -965,11 +1013,13 @@ impl HalfClose for Scripted {
         fail(self.plan.close)
     }
 
-    fn set_read_wait(&mut self, _: Option<Duration>) -> io::Result<()> {
+    fn set_read_wait(&mut self, wait: Option<Duration>) -> io::Result<()> {
+        self.seen.lock().unwrap().read_waits.push(wait);
         fail(self.plan.read_waits)
     }
 
-    fn set_write_wait(&mut self, _: Option<Duration>) -> io::Result<()> {
+    fn set_write_wait(&mut self, wait: Option<Duration>) -> io::Result<()> {
+        self.seen.lock().unwrap().write_waits.push(wait);
         let this = self.write_waits_set;
         self.write_waits_set += 1;
         fail(
@@ -1004,6 +1054,15 @@ impl Connector for Script {
 /// outcome and, once the call's thread has dropped the stream (bounded),
 /// what the stream saw.
 fn scripted_with(op: Op, plan: Plan, timeouts: Timeouts) -> (Result<Reply, CallError>, Seen) {
+    scripted_request(&request(op), plan, timeouts)
+}
+
+/// [`scripted_with`], for `request`.
+fn scripted_request(
+    request: &Request,
+    plan: Plan,
+    timeouts: Timeouts,
+) -> (Result<Reply, CallError>, Seen) {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let (gone, dropped) = mpsc::channel();
     let script = Script {
@@ -1011,7 +1070,7 @@ fn scripted_with(op: Op, plan: Plan, timeouts: Timeouts) -> (Result<Reply, CallE
         seen: Arc::clone(&seen),
         gone: Mutex::new(Some(gone)),
     };
-    let outcome = call(&LocalClient::with_connector(script, timeouts), &request(op));
+    let outcome = call(&LocalClient::with_connector(script, timeouts), request);
     assert_eq!(
         dropped.recv_timeout(TEST_WAIT),
         Err(mpsc::RecvTimeoutError::Disconnected),
@@ -1024,6 +1083,142 @@ fn scripted_with(op: Op, plan: Plan, timeouts: Timeouts) -> (Result<Reply, CallE
 /// [`scripted_with`], with timeouts no stream here comes close to.
 fn scripted(op: Op, plan: Plan) -> (Result<Reply, CallError>, Seen) {
     scripted_with(op, plan, PATIENT)
+}
+
+/// The most the client offers in one write: 4 KiB (`WRITE_CHUNK` of the
+/// exchange).
+const WRITE_CHUNK: usize = 4096;
+
+/// A bootstrap whose line is about 20 KiB: five chunks.
+fn long_bootstrap() -> Request {
+    let Request::Bootstrap(mut bootstrap) = request(Op::Bootstrap) else {
+        unreachable!()
+    };
+    bootstrap.credential_spki = vec![0xc7; 10_000];
+    Request::Bootstrap(bootstrap)
+}
+
+/// A line longer than a chunk is offered a chunk at a time, each offer at
+/// most [`WRITE_CHUNK`] bytes and each after its own wait is set, whether
+/// the stream takes whole offers or part of each; the whole line is
+/// written and the call succeeds.
+#[test]
+fn a_long_line_is_offered_a_chunk_at_a_time() {
+    let long = long_bootstrap();
+    let line = long.encode().unwrap();
+    let line = line.as_bytes();
+    assert!(line.len() > 4 * WRITE_CHUNK, "{}", line.len());
+    let reply = golden_success(Op::Bootstrap);
+    let expected = parse_reply(Op::Bootstrap, &reply).unwrap();
+    for per_write in [usize::MAX, 1000] {
+        let plan = Plan {
+            per_write,
+            ..Plan::new(&reply)
+        };
+        let (outcome, seen) = scripted_request(&long, plan, PATIENT);
+        assert_eq!(outcome, Ok(expected.clone()), "{per_write}");
+        assert_eq!(seen.written, line, "{per_write}");
+        assert!(
+            seen.offers.iter().all(|&offer| offer <= WRITE_CHUNK),
+            "{per_write}: {:?}",
+            seen.offers
+        );
+        assert!(
+            seen.offers.len() >= line.len().div_ceil(WRITE_CHUNK),
+            "{per_write}: {:?}",
+            seen.offers
+        );
+        assert_eq!(seen.write_waits.len(), seen.offers.len(), "{per_write}");
+    }
+}
+
+/// The waits set: before each write, the idle timeout or what is left of
+/// the total if less; before the first read, what is left of the total
+/// alone (none without a total); before each later read, as before a
+/// write (each chunk's). One wait per read.
+#[test]
+fn the_waits_set_are_the_idle_timeout_and_what_is_left_of_the_total() {
+    let idle = Duration::from_secs(5);
+    let near = |wait: &Option<Duration>, bound: Duration| {
+        wait.is_some_and(|wait| wait <= bound && wait > bound - Duration::from_secs(1))
+    };
+    let reply = golden_success(Op::Restore);
+    let expected = parse_reply(Op::Restore, &reply).unwrap();
+    // A total longer than the idle timeout, and a line of several chunks.
+    let total = Duration::from_secs(60);
+    let bootstrapped = golden_success(Op::Bootstrap);
+    let (outcome, seen) = scripted_request(
+        &long_bootstrap(),
+        Plan::new(&bootstrapped),
+        Timeouts { total, idle },
+    );
+    assert_eq!(outcome, parse_reply(Op::Bootstrap, &bootstrapped));
+    assert!(seen.write_waits.len() > 1, "{seen:?}");
+    assert!(
+        seen.write_waits.iter().all(|wait| near(wait, idle)),
+        "{seen:?}"
+    );
+    assert!(near(&seen.read_waits[0], total), "{seen:?}");
+    assert!(seen.read_waits.len() > 2, "{seen:?}");
+    assert!(
+        seen.read_waits[1..].iter().all(|wait| near(wait, idle)),
+        "{seen:?}"
+    );
+    assert_eq!(seen.read_waits.len(), seen.reads, "{seen:?}");
+    // A total shorter than the idle timeout bounds every wait.
+    let total = Duration::from_secs(2);
+    let (outcome, seen) = scripted_with(
+        Op::Restore,
+        Plan::new(&reply),
+        Timeouts {
+            total,
+            idle: TEST_WAIT,
+        },
+    );
+    assert_eq!(outcome, Ok(expected.clone()));
+    for wait in seen.write_waits.iter().chain(&seen.read_waits) {
+        assert!(near(wait, total), "{seen:?}");
+    }
+    // No total: the idle timeout, and no bound on the first read.
+    let (outcome, seen) = scripted_with(
+        Op::Restore,
+        Plan::new(&reply),
+        Timeouts {
+            total: Duration::MAX,
+            idle,
+        },
+    );
+    assert_eq!(outcome, Ok(expected));
+    assert!(seen.write_waits.iter().all(|wait| *wait == Some(idle)));
+    assert_eq!(seen.read_waits[0], None);
+    assert!(seen.read_waits[1..].iter().all(|wait| *wait == Some(idle)));
+}
+
+/// A write that takes nothing (`Ok(0)`) is a lost connection
+/// ([`io::ErrorKind::WriteZero`]), not a write retried until the total: the
+/// reply is still read, and a success is not believed.
+#[test]
+fn a_write_that_takes_nothing_is_a_lost_connection() {
+    let timeouts = Timeouts {
+        total: Duration::from_secs(1),
+        idle: TEST_WAIT,
+    };
+    let reply = golden_success(Op::Restore);
+    let plan = Plan {
+        per_write: 0,
+        ..Plan::new(&reply)
+    };
+    let (outcome, seen) = scripted_with(Op::Restore, plan, timeouts);
+    assert_eq!(
+        outcome,
+        Err(CallError::Unknown(UnknownOutcome::ConnectionLost(
+            io::ErrorKind::WriteZero
+        )))
+    );
+    assert_eq!(seen.offers.len(), 1, "{seen:?}");
+    assert!(seen.written.is_empty());
+    assert!(seen.closed);
+    assert_eq!(seen.read, reply.len());
 }
 
 /// An end of the write half that fails after the whole line was written
@@ -1297,7 +1492,10 @@ fn a_connect_that_returns_after_the_caller_gave_up_is_never_written() {
     let outcome = call(&client, &request(Op::Restore));
     let took = start.elapsed();
     assert_eq!(outcome, Err(CallError::NotSent(NotSent::TimedOut)));
-    assert!(took >= timeouts.total && took < TEST_WAIT / 2, "{took:?}");
+    assert!(
+        at_least(took, timeouts.total) && took < TEST_WAIT / 2,
+        "{took:?}"
+    );
     // Now the connect returns; the peer reads the end of the stream, and
     // not one byte, once the call's thread has dropped its end.
     let (theirs, mut ours) = UnixStream::pair().unwrap();

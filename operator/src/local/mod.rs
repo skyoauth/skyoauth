@@ -28,10 +28,10 @@
 //! The server may answer before it has read the whole request: a peer it
 //! refuses gets `forbidden` at once, before any read, and a line over
 //! 64 KiB or a byte after the newline gets `invalid_request` as soon as it
-//! is read. So the exchange (a later part of this module, with the socket
-//! I/O) must still read the reply after its write fails (`EPIPE`: the
-//! server answered and closed first), and must keep the bytes it read
-//! before an `ECONNRESET` (the server closed with request bytes unread).
+//! is read. So the exchange ([`LocalClient`]) still reads the reply after
+//! its write fails (`EPIPE`: the server answered and closed first), and
+//! keeps the bytes it read before an `ECONNRESET` (the server closed with
+//! request bytes unread).
 //!
 //! The wire format is inferred: the service's module docs say no contract
 //! text fixes it. The fixture
@@ -58,7 +58,7 @@
 //!   can never be confirmed through this socket. The codec reports what
 //!   the server sent: [`parse_reply`] returns `Refused(AuthUnavailable)`
 //!   or `Refused(ServerError)` for these, for every operation. The
-//!   client's call (the exchange, a later part) reports these two codes as
+//!   client's call ([`LocalClient`]) reports these two codes as
 //!   an unknown outcome ([`CallError::Unknown`], carrying the wire code)
 //!   for `bootstrap`, `issue_challenge` and `restore`, and as
 //!   [`CallError::Refused`] only for `preview`, which writes nothing:
@@ -245,8 +245,9 @@ pub enum NotSent {
     /// path that is not a listening socket, a permission refused, ...), or
     /// the call's thread could not start.
     Connect(io::ErrorKind),
-    /// [`Timeouts::total`] ran out while connecting; a connection made
-    /// later is dropped before anything is written to it.
+    /// [`Timeouts::total`] ran out before anything was written: while
+    /// connecting (a connection made later is dropped before anything is
+    /// written to it), or between the connect and the first write.
     TimedOut,
     /// The connection refused the wait of the first write, with the error's
     /// kind ([`HalfClose::set_write_wait`]); nothing was written to it.
@@ -259,7 +260,7 @@ impl fmt::Display for NotSent {
             Self::TooLarge => "the request line is larger than 64 KiB",
             Self::InvalidTimeouts => "a timeout of the client is zero",
             Self::Connect(_) => "no connection to the local transport could be made",
-            Self::TimedOut => "the wait ran out while connecting",
+            Self::TimedOut => "the total wait ran out before anything was written",
             Self::Setup(_) => "the connection refused the time limit of the first write",
         })
     }
@@ -336,8 +337,8 @@ pub enum CallError {
     /// transaction was rolled back. [`parse_reply`] gives this for every
     /// code and every operation, [`ErrorCode::AuthUnavailable`] and
     /// [`ErrorCode::ServerError`] included. Since a failed `COMMIT` is
-    /// answered with one of these two, the client's call (the exchange, a
-    /// later part) reports them as [`CallError::Unknown`], carrying the
+    /// answered with one of these two, the client's call ([`LocalClient`])
+    /// reports them as [`CallError::Unknown`], carrying the
     /// wire code, for `bootstrap`, `issue_challenge` and `restore`, and as
     /// a refusal only for `preview`: after a write, reconcile first (see
     /// the [module documentation](self), "Outcomes").
