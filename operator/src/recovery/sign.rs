@@ -16,6 +16,7 @@
 use std::fmt;
 
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
+use zeroize::Zeroize as _;
 
 use super::{Challenge, KeyError, RecoveryPublicKey, SIGNATURE_LENGTH, VerifiedChallenge};
 
@@ -113,12 +114,29 @@ impl std::error::Error for SignerError {}
 /// and its `Debug` prints `SoftwareSigner(..)`. It signs only a
 /// [`SigningRequest`], so only through [`sign_challenge`] and its checks.
 ///
-/// It is **not** wiped from memory when the signer is dropped: the crate's
-/// `ed25519-dalek` is built without its `zeroize` feature (the workspace
-/// builds it with `default-features = false`), and the crate adds no
-/// wiping of its own, which without that feature could not be relied on.
-/// The copy of the seed that [`SoftwareSigner::from_seed`] takes by value
-/// is the caller's to keep short-lived.
+/// It is wiped from memory, with `zeroize`'s writes (volatile, and kept
+/// in order by a compiler fence, so the compiler does not drop them as
+/// dead stores):
+///
+/// - [`SoftwareSigner::from_seed`] wipes the copy of the seed it takes by
+///   value as soon as the signing key is made from it, before it checks
+///   the public key, so on every return;
+/// - the signing key that holds the seed is wiped when the signer is
+///   dropped: the crate builds `ed25519-dalek` with its `zeroize` feature,
+///   whose `SigningKey` wipes its secret half on drop, as it wipes the
+///   expanded secret key it derives for each signature.
+///
+/// What is not wiped here: the caller's own copy of the seed (an array is
+/// `Copy`, so passing it by value leaves the caller's array as it was: the
+/// caller wipes it, as the package's binary does); a copy the compiler
+/// makes when it moves the array or the signer (a move is a bitwise copy
+/// that leaves the old place unwiped, and Rust gives no way to control
+/// it); the intermediate values of the signing code in `ed25519-dalek`
+/// and `sha2` (such as the SHA-512 state over the seed), registers and
+/// spilled temporaries; and any copy outside the process's control, such
+/// as swap, a core dump or a hibernation image. The wipe is a best effort
+/// that shortens the seed's life in memory, not a guarantee that no copy
+/// remains.
 ///
 /// Signing is deterministic (RFC 8032): no random source is used.
 pub struct SoftwareSigner {
@@ -136,6 +154,12 @@ impl SoftwareSigner {
     /// The signer of the 32-byte Ed25519 seed `seed` (the RFC 8032 private
     /// key).
     ///
+    /// The seed is taken by value, and this copy is wiped once the signing
+    /// key is made from it, before any other step, on every return. The
+    /// caller's array is the caller's: it is a separate copy, which this
+    /// function cannot reach and does not wipe (see [`SoftwareSigner`],
+    /// "The seed").
+    ///
     /// # Errors
     ///
     /// The [`KeyError`] of [`RecoveryPublicKey::from_bytes`] for the seed's
@@ -143,8 +167,10 @@ impl SoftwareSigner {
     /// of large order, so this is not expected to happen; the key is
     /// checked as the service checks a recovery key all the same, rather
     /// than assumed to pass.
-    pub fn from_seed(seed: [u8; 32]) -> Result<Self, KeyError> {
+    pub fn from_seed(mut seed: [u8; 32]) -> Result<Self, KeyError> {
         let signing_key = SigningKey::from_bytes(&seed);
+        // The signing key holds its own copy, wiped on drop.
+        seed.zeroize();
         let public_key = RecoveryPublicKey::from_bytes(signing_key.verifying_key().as_bytes())?;
         Ok(Self {
             signing_key,

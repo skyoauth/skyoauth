@@ -51,7 +51,8 @@ list: on macOS an ACL can let others read the seed file or a new --out file
 the seed file and from the --out directory (ls -le, chmod -N).
 On Windows its protection is NOT checked: keep it where only you can read
 it. The seed is never taken from the command line or the environment,
-never printed, and not wiped from memory.
+never printed, and wiped from this process's memory once used (a best
+effort: copies the system makes, such as swap or a core dump, are not).
 
 A refused sign creates no file. A write to --out that fails (exit 3) may
 leave a partial or empty file: remove it. Under a file-size limit

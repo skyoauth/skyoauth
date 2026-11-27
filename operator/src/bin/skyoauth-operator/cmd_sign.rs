@@ -51,15 +51,21 @@ fn sign(flags: &Sign) -> Result<String, Failure> {
     };
     let verified = check_challenge(&challenge, &expectations)
         .map_err(|refusal| Failure::Refused(format!("refused ({refusal:?}): {refusal}")))?;
-    // The signer lives in this block only: it is not wiped, but not kept
-    // either.
+    // The seed and the signer live in this block only, and both are wiped
+    // on every return: the seed is a `seed_file::Seed`, read in place and
+    // wiped on drop; `from_seed` wipes the one copy it is given; the
+    // signer's signing key is wiped when the signer is dropped.
     let signed = {
-        let signer =
-            SoftwareSigner::from_seed(seed_file::read(&flags.seed_file)?).map_err(|err| {
-                Failure::Refused(format!(
-                    "--seed-file: the seed's public key is refused ({err:?}): {err}"
-                ))
-            })?;
+        let mut seed = seed_file::Seed::default();
+        seed_file::read(&flags.seed_file, &mut seed)?;
+        let signer = SoftwareSigner::from_seed(*seed);
+        // The signer holds the seed from here on: this copy is wiped now.
+        drop(seed);
+        let signer = signer.map_err(|err| {
+            Failure::Refused(format!(
+                "--seed-file: the seed's public key is refused ({err:?}): {err}"
+            ))
+        })?;
         sign_challenge(&verified, &signer)
             .map_err(|err| Failure::Refused(format!("refused ({err:?}): {err}")))?
     };

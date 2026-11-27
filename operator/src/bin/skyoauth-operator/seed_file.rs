@@ -28,14 +28,38 @@
 //!
 //! No message holds the path, the file's bytes or the seed: a failure is
 //! named by the flag and its kind. Nothing here derives or implements
-//! `Debug`. The seed is not wiped from memory: neither this binary nor the
-//! library's software signer (built without `zeroize`) wipes it.
+//! `Debug`.
+//!
+//! # Wiping
+//!
+//! The file's bytes and the seed are wiped from memory with `zeroize`
+//! (volatile writes kept in order by a compiler fence, so they are not
+//! removed as dead stores), on every return, refusals and errors
+//! included:
+//!
+//! - the bytes are read into a [`Buffer`], a fixed array wiped on drop,
+//!   with no other buffer in between (`File::read` reads into it
+//!   directly);
+//! - the seed is decoded in place into the caller's [`Seed`], an array
+//!   wiped on drop, so it is never returned or moved by value; `sign`
+//!   copies it once, into the library's software signer, which wipes that
+//!   copy once its signing key is made, and the signing key when it is
+//!   dropped.
+//!
+//! Both types are checked at compile time to be wiped on drop
+//! ([`assert_wiped_on_drop`]). Not covered: the copies the system keeps
+//! (the kernel's page cache of the file, swap, a core dump, a hibernation
+//! image), registers and spilled temporaries of the decoding, any
+//! bitwise copy the compiler makes when it moves a value, and the
+//! library signer's own limits (its documentation, "The seed").
 
 use std::{
     fs::{self, File, Metadata},
     io::{self, Read},
     path::Path,
 };
+
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::Failure;
 
@@ -49,6 +73,22 @@ const SEED_BYTES: usize = 32;
 /// Larger than a seed (64 digits and a newline), so a file with a few bytes
 /// too many is refused as what it is, not a seed.
 const MAX_SEED_FILE_BYTES: usize = 128;
+
+/// The seed, decoded in place: wiped on drop.
+pub type Seed = Zeroizing<[u8; SEED_BYTES]>;
+
+/// The bytes read from the file, at most one more than
+/// [`MAX_SEED_FILE_BYTES`]: wiped on drop.
+type Buffer = Zeroizing<[u8; MAX_SEED_FILE_BYTES + 1]>;
+
+/// Compiles only for a type that is wiped on drop.
+const fn assert_wiped_on_drop<T: ZeroizeOnDrop>() {}
+
+// The seed and the buffer are wiped on drop, or the binary does not build.
+const _: () = {
+    assert_wiped_on_drop::<Seed>();
+    assert_wiped_on_drop::<Buffer>();
+};
 
 /// The required mode of the file on Unix: read and write for its owner,
 /// nothing else (no special bit either).
@@ -70,7 +110,8 @@ fn too_large() -> Failure {
     ))
 }
 
-/// The seed of the seed file at `path`.
+/// Reads the seed of the seed file at `path` into `seed`, in place, so
+/// that it is never moved by value.
 ///
 /// # Errors
 ///
@@ -78,8 +119,9 @@ fn too_large() -> Failure {
 /// a regular file, is not protected (Unix: owned by another user, or of
 /// another mode than 0600), changed between its check and its opening, or
 /// is larger than 128 bytes; [`Failure::Refused`] when its bytes are not
-/// a seed.
-pub fn read(path: &Path) -> Result<[u8; SEED_BYTES], Failure> {
+/// a seed. `seed` may then hold part of a seed, wiped when it is
+/// dropped.
+pub fn read(path: &Path, seed: &mut Seed) -> Result<(), Failure> {
     let owner = effective_owner()?;
     let checked = fs::symlink_metadata(path).map_err(|err| unreadable(&err))?;
     if checked.file_type().is_symlink() {
@@ -94,7 +136,7 @@ pub fn read(path: &Path) -> Result<[u8; SEED_BYTES], Failure> {
             "the file changed between its check and its opening",
         ));
     }
-    let mut buffer = [0_u8; MAX_SEED_FILE_BYTES + 1];
+    let mut buffer = Buffer::new([0_u8; MAX_SEED_FILE_BYTES + 1]);
     let mut length = 0;
     while length < buffer.len() {
         match file.read(&mut buffer[length..]) {
@@ -107,7 +149,7 @@ pub fn read(path: &Path) -> Result<[u8; SEED_BYTES], Failure> {
     if length > MAX_SEED_FILE_BYTES {
         return Err(too_large());
     }
-    decode(&buffer[..length]).ok_or_else(|| {
+    decode(&buffer[..length], seed).ok_or_else(|| {
         Failure::Refused(format!(
             "{FLAG}: the file is not a seed: 64 lowercase hexadecimal digits, optionally \
              followed by one newline"
@@ -128,19 +170,19 @@ fn check(metadata: &Metadata, owner: &Owner) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The seed of `bytes`: 64 lowercase hexadecimal digits and an optional
-/// newline.
-fn decode(bytes: &[u8]) -> Option<[u8; SEED_BYTES]> {
+/// Decodes the seed of `bytes`, 64 lowercase hexadecimal digits and an
+/// optional newline, into `seed`, in place. `None` when `bytes` are not a
+/// seed; `seed` may then hold its first bytes.
+fn decode(bytes: &[u8], seed: &mut [u8; SEED_BYTES]) -> Option<()> {
     let digits = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     let (pairs, rest) = digits.as_chunks::<2>();
     if pairs.len() != SEED_BYTES || !rest.is_empty() {
         return None;
     }
-    let mut seed = [0_u8; SEED_BYTES];
     for (byte, [high, low]) in seed.iter_mut().zip(pairs) {
         *byte = (hex_digit(*high)? << 4) | hex_digit(*low)?;
     }
-    Some(seed)
+    Some(())
 }
 
 /// The value of one lowercase hexadecimal digit.

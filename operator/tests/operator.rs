@@ -9,8 +9,9 @@
 //! when a file, a member or a case is not
 //! (`every_fixture_file_and_case_is_covered`). `redaction` checks that no
 //! key, signature or challenge value is shown, that no source writes a
-//! file but the binary's `sign` (its new `--out`), and that only `sign`
-//! names the signer.
+//! file but the binary's `sign` (its new `--out`), that only `sign`
+//! names the signer, and that the seed is wiped (compile-time and source
+//! checks, and the wipe observed on values still alive).
 //!
 //! `local_wire` (portable, like the codec) checks the
 //! deployment-local transport's wire codec against
