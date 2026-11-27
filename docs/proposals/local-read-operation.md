@@ -131,7 +131,7 @@ The type notation is the fixture's, with `|null` for a nullable member
 | `revoked_credential_ids` | `string_list\|null` | when `restored`: the next page of them, in byte order, after `revoked_after` |
 | `enrolled_state` | `string\|null` | null when no `credential_spki` was asked; else `not_found`, `enabled`, `disabled` or `revoked`, for the credential with that public identity |
 | `enrolled_admin_id`, `enrolled_credential_id` | `string\|null` | that credential's operator and ID, when found |
-| `enrolled_trust_anchor_sha256` | `hex\|null` | when found: the lowercase hex SHA-256 of the exact UTF-8 bytes of the stored `trust_anchor_ref` string (no normalization), hashed by the service at read time; the client hashes exactly the string it sent; the table stores the reference, not a digest (`0005_operator.sql:130-138`), and `sha2` is already a service dependency (`service/Cargo.toml:19`) (lead ruling, (b)) |
+| `enrolled_trust_anchor_sha256` | `hex\|null` | when found: the lowercase hex SHA-256 of the exact UTF-8 bytes of the stored `trust_anchor_ref` string (no normalization), hashed by the service at read time; the client hashes the UTF-8 bytes of the `trust_anchor_ref` value it sent (the decoded string, not its JSON-escaped wire form); the table stores the reference, not a digest (`0005_operator.sql:130-138`), and `sha2` is already a service dependency (`service/Cargo.toml:19`) (lead ruling, (b)) |
 
 A `RecoveryState` row whose `bootstrap_closed` is false still counts as
 closed (identity-registry :298-299), so `instance_id` and the other state
@@ -277,10 +277,20 @@ client still never retries on its own (`operator/src/local/mod.rs:75`):
   the bootstrap's `credential_spki`, the same DER bytes it sent.
   - `instance_id`, `recovery_public_key`, the mTLS key (`enrolled_state`
     not `not_found`) and `enrolled_trust_anchor_sha256` all equal what was
-    sent (the client hashes the `trust_anchor_ref` it sent): **the current
-    state matches** the request (`enrolled_admin_id`,
+    sent (the client hashes the UTF-8 bytes of the `trust_anchor_ref` value
+    it sent: the decoded string, not its JSON-escaped wire form): **the
+    current state matches** the request (`enrolled_admin_id`,
     `enrolled_credential_id`; no binding ID, Q8). Which request won no
-    longer matters: the effects are identical.
+    longer matters; all equal: the current state is consistent with this
+    request having committed; do not repeat it. `status` does not show the
+    operator's identity status or role, and the key may have been enrolled
+    by a later write (the online operator enrollment may reuse the
+    deployment CA as anchor); the credential is usable only if
+    `enrolled_state` is `enabled` (a `disabled` credential, or a `revoked`
+    one after a restore that reused a retired key, still matches).
+  - A member "the operator holds an enabled instance `security_admin`"
+    would widen a local peer's read: recorded as an option for the lead,
+    user informed, not built.
   - `instance_id` null: repeat the same bootstrap, which the database
     closes once (`mod.rs:313-317`).
   - anything else (another instance, another recovery key, the mTLS key
@@ -416,7 +426,9 @@ assuming no other restore commits before the client polls; if one does,
 `status` agree by construction, absent a tie.
 
 **Ties.** A tie between two restores needs a clock that repeats a
-microsecond (a fixed test clock, or a clock stepped back): two restores
+microsecond (a fixed test clock, or a clock stepped back), or two replicas
+whose clocks disagree (the restore reads `now` inside `within`, after
+`BEGIN`, `ops.rs:498-507`): two restores
 need two signed challenges, and the second can only be issued at the epoch
 the first one's commit created (a challenge of the earlier epoch is
 `retired` once the first commits), so in normal operation its `now` is
@@ -434,7 +446,8 @@ added by an in-place, pre-beta amendment of `0005`, would make membership
 exact. It has the shape of the nonce ruling of the recovery proposal
 ("recorded as an option, not built",
 `docs/proposals/recovery-verified-response.md:441-443`; the user,
-2026-11-24, `docs/threat-model.md:926-929`).
+2026-11-24, `docs/threat-model.md:926-929`). Building it is a schema
+change and goes to the user; the user is informed, as for the nonce.
 
 ### Atomicity and audit
 
@@ -489,9 +502,19 @@ fixture pins (F9).
    (g)): "The recovery read never returns the operation row: one registry
    function, beside the restoration's own check of the row, returns only
    the closed state of a recovery challenge and the projection of 'Reading
-   the recovery state' (lead ruling, 2026-11-27). The getter of
-   administrative operations returns the full row of the kinds its caller
-   names." Today's text is wider than the code (above).
+   the recovery state' (lead ruling, 2026-11-27). The registry's
+   operation getters, `get_administrative_operation` (by the kinds its
+   caller names) and `lock_administrative_operation` (by ID), return the
+   full row; no caller exposes an `operator_restoration` row (the D4 reads
+   name only the five gated-write kinds; the approval paths refuse that
+   kind via `OperationKind::from_name`)." Today's text is wider than the
+   code (above). Checked: `operation.rs:430-463`, both public
+   (`registry/mod.rs:518-521`, :527); the D4 read passes `kinds_of`, a
+   subset of `OperationKind::ALL` (`service/src/operation/read.rs:231-238`,
+   :361-367), and filters again by `from_name` (:296-298); approve and
+   reject reach `from_name` through `check_approver` and cancel directly
+   (`service/src/operation/approval.rs:159-165`, :183, :454, :807), each
+   before `lock_administrative_operation` (:482, :822).
 3. **identity-registry "Restoration" (:370-381)**, appended: "The local
    transport's reply carries the number of revoked credentials and a
    bounded number of their IDs (the transport's page size, pinned by the
@@ -669,7 +692,11 @@ reconcile cases there would add test IDs to `scenarios.toml`, which
    `exchange.rs:469`, and the C1 encoder and reply parser. Both crates
    check the same fixture, and `operator/tests/local_wire/mod.rs:267`
    requires its `ops` to equal `Op::ALL`, so none of this can land alone
-   (lead ruling, (f)).
+   (lead ruling, (f)). The same PR adds a `status` arm and golden in
+   `operator/tests/local_exchange/mod.rs`: the matches of `request`
+   (:173) and `golden_success` (:202), which its seven `for op in Op::ALL`
+   loops (:322, :370, :794, :903, :1298, :1334, :1695) reach, and the
+   retry table (:1648-1656), which lists every op.
 3. **Operator C4 PR:** `LocalClient::status`, the page iterator and its
    checks, and the reconcile procedure in the docs.
 
