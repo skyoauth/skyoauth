@@ -1,7 +1,7 @@
 # Proposal: the online operator commands over the deployment-local socket (D2)
 
-Status: Proposal, for the lead's ruling before any implementation; this
-document changes no contract under `docs/contracts/` and no code. It
+Status: Ruled by the lead 2026-11-27 (all eight recommendations accepted);
+implementation not started. This document changes no contract under `docs/contracts/` and no code. It
 extends [the offline command line](operator-cli-artifacts.md) (D1) with the
 commands that talk to the service's deployment-local transport. "D2" here
 names this slice of the operator command line, not the entry "D2 names" of
@@ -42,7 +42,7 @@ It depends on C4 (`LocalClient::status`, `RestoreVerdict`,
   dependencies").
 - **Everything else is proposed here**, marked "(proposed)" where it is a
   pick; the eight that most need a ruling are under
-  [Open questions for the lead](#open-questions-for-the-lead).
+  [Rulings](#rulings).
 
 ## Where the commands run
 
@@ -376,36 +376,32 @@ them (the client is Unix), with the access-control-list residual of
 The implementation PR also amends D1's proposal ("it reads no socket"),
 the binary's module docs and help, and the README's operator paragraph.
 
-## Open questions for the lead
+## Rulings
 
-1. **Reconcile automatically or print what to run?** Recommendation:
-   print only (above); one write per invocation, no read on its heels.
-   Alternative: one automatic `status` after exit 5, never a repeat.
-2. **Exit codes 5 and 6** as defined, rather than folding not sent into
-   3 and unknown into 1. Recommendation: 5 and 6; they are the library's
-   `Retry` split, and 3 already means "I/O on this side".
-3. **`status` exit code:** 0 for every answered read, the verdict on
-   standard output; or a code per verdict. Recommendation: 0 and a stable
-   `verdict:` line; seven verdicts would crowd the table.
-4. **`--service-uid` required, `--trust-ancestors` defaulting to
-   `service-or-root`.** Recommendation: as proposed; a default UID is
-   wrong under root, and `service-or-root` is the library's documented
-   usual case.
-5. **`--socket` required, no default.** Recommendation: required until
-   the binding slice fixes a path; a default can be added then without
-   breaking a caller.
-6. **The verbatim reply for `--out`.** Recommendation: a small addition
-   to `LocalClient` in the D2 PR that returns the reply line with the
-   parsed `Challenge`, rather than re-encoding `Issued` in the binary
-   (equal only while the parser accepts one form).
-7. **Online commands on Windows:** parsed, then exit 2 with a fixed text.
-   Recommendation: as proposed (known from the command line alone, as
-   D1's usage rule for `sign`); not compiling them out keeps one help and
-   one parser on every platform.
-8. **The binary against the real service in `pg`.** Recommendation: the
-   fake server with the fixture's real bytes in D2, the library journey
-   with the approved dev-dependency, and the binary journey as a CI
-   follow-up (the job passes the binary's path).
+All by the lead, 2026-11-27, on review of this proposal; each accepts the
+recommendation that was made with the question.
+
+1. **Reconcile:** the command prints what to run; no automatic reconcile.
+   One write per invocation, no read on its heels.
+2. **Exit codes 5 and 6** as defined (5: a write's outcome is unknown; 6:
+   nothing was changed).
+3. **`status` exit code:** 0 for every answered read, with the stable
+   `verdict:` line.
+4. **`--service-uid` required; `--trust-ancestors` defaults to
+   `service-or-root`.**
+5. **`--socket` required, no default**, until the binding slice fixes a
+   path.
+6. **The verbatim reply for `--out`:** a small addition to `LocalClient`
+   that returns the reply line verbatim together with the parsed
+   `Challenge`, in the D2 implementation.
+7. **Online commands on Windows:** parsed, then exit 2 with fixed text.
+8. **Tests:** the fake server with the fixture's real bytes in D2; the
+   library journey with the approved `skyoauth-scenarios` dev-dependency
+   (a separate PR); the binary journey in `pg` is a CI follow-up, the job
+   passing the binary's path and failing loudly when it is missing.
+
+Everything else in the proposal stands, including `--out` created new
+before the request is sent, and the output rules.
 
 ## Not verified
 
