@@ -13,12 +13,14 @@ use std::collections::BTreeSet;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use skyoauth_operator::{
     identity::public_identity_of_spki,
     local::{
-        BootstrapRequest, Bootstrapped, CallError, ErrorCode, IssueChallengeRequest, Issued,
-        MAX_REPLY_BYTES, MAX_REQUEST_BYTES, NotSent, Op, Previewed, Reply, Request,
-        ResponseRequest, Restored, UnknownOutcome, parse_reply,
+        BootstrapRequest, Bootstrapped, CallError, EnrolledState, ErrorCode, IssueChallengeRequest,
+        Issued, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, MAX_REVOKED_IDS_PER_REPLY, NotSent, Op,
+        OperationState, Previewed, Reply, Request, ResponseRequest, Restored, Status,
+        StatusRequest, UnknownOutcome, parse_reply,
     },
     recovery::{
         DEFAULT_CHALLENGE_TTL, Expectations, RecoveryPublicKey, check_challenge, parse_challenge,
@@ -40,13 +42,19 @@ const UNKNOWN_CLASSES: [(UnknownOutcome, &str); 6] = [
 ];
 
 /// The reply shapes of the fixture, with the operation each answers.
-const SHAPES: [(&str, Option<Op>); 5] = [
+const SHAPES: [(&str, Option<Op>); 6] = [
     ("bootstrapped", Some(Op::Bootstrap)),
     ("issued", Some(Op::IssueChallenge)),
     ("previewed", Some(Op::Preview)),
     ("restored", Some(Op::Restore)),
+    ("status", Some(Op::Status)),
     ("error", None),
 ];
+
+/// The member types of the fixture's reply shapes; each but `code` may
+/// also be written `<type>|null`, a member always present whose value is
+/// of that type or `null` (the `status` reply's).
+const TYPES: [&str; 5] = ["string", "integer", "hex", "string_list", "code"];
 
 /// The fixture file, parsed.
 pub fn wire_fixture() -> Value {
@@ -81,8 +89,47 @@ fn signature(value: &Value) -> [u8; 64] {
     unhex(text(value, "signature")).try_into().unwrap()
 }
 
-/// The request of a golden request case.
-fn request_of(case: &Value) -> Request {
+/// The member `name` of `value`, which must be present: `None` for `null`,
+/// else `read` of it.
+fn nullable<T>(value: &Value, name: &str, read: impl FnOnce(&Value) -> T) -> Option<T> {
+    let member = value
+        .get(name)
+        .unwrap_or_else(|| panic!("no {name} in {value}"));
+    (!member.is_null()).then(|| read(member))
+}
+
+fn as_text(value: &Value) -> String {
+    value.as_str().unwrap().to_owned()
+}
+
+fn as_integer(value: &Value) -> i64 {
+    value.as_i64().unwrap()
+}
+
+fn as_hex(value: &Value) -> Vec<u8> {
+    unhex(value.as_str().unwrap())
+}
+
+fn as_ids(value: &Value) -> Vec<String> {
+    value.as_array().unwrap().iter().map(as_text).collect()
+}
+
+fn operation_state(value: &Value) -> OperationState {
+    OperationState::ALL
+        .into_iter()
+        .find(|state| state.as_str() == value.as_str().unwrap())
+        .unwrap_or_else(|| panic!("no operation state {value}"))
+}
+
+fn enrolled_state(value: &Value) -> EnrolledState {
+    EnrolledState::ALL
+        .into_iter()
+        .find(|state| state.as_str() == value.as_str().unwrap())
+        .unwrap_or_else(|| panic!("no enrolled state {value}"))
+}
+
+/// The request of a golden request case (also read by `local_exchange`).
+pub fn request_of(case: &Value) -> Request {
     let values = &case["values"];
     let response = || ResponseRequest {
         operation_id: owned(values, "operation_id"),
@@ -102,6 +149,11 @@ fn request_of(case: &Value) -> Request {
         }),
         Op::Preview => Request::Preview(response()),
         Op::Restore => Request::Restore(response()),
+        Op::Status => Request::Status(StatusRequest {
+            operation_id: nullable(values, "operation_id", as_text),
+            credential_spki: nullable(values, "credential_spki", as_hex),
+            revoked_after: nullable(values, "revoked_after", as_text),
+        }),
     }
 }
 
@@ -132,6 +184,7 @@ fn reply_of(shape: &str, values: &Value) -> Reply {
             admin_id: owned(values, "admin_id"),
             credential_id: owned(values, "credential_id"),
             binding_id: owned(values, "binding_id"),
+            revoked_credential_count: integer(values, "revoked_credential_count"),
             revoked_credential_ids: list(values, "revoked_credential_ids")
                 .iter()
                 .map(|id| id.as_str().unwrap().to_owned())
@@ -139,6 +192,26 @@ fn reply_of(shape: &str, values: &Value) -> Reply {
             recovery_key_epoch: integer(values, "recovery_key_epoch"),
             recovery_state_revision: integer(values, "recovery_state_revision"),
         }),
+        "status" => Reply::Status(Box::new(Status {
+            server_time: integer(values, "server_time"),
+            instance_id: nullable(values, "instance_id", as_text),
+            recovery_key_epoch: nullable(values, "recovery_key_epoch", as_integer),
+            recovery_state_revision: nullable(values, "recovery_state_revision", as_integer),
+            recovery_public_key: nullable(values, "recovery_public_key", as_hex),
+            operation_state: nullable(values, "operation_state", operation_state),
+            expires_at: nullable(values, "expires_at", as_integer),
+            settles_at: nullable(values, "settles_at", as_integer),
+            restored_at: nullable(values, "restored_at", as_integer),
+            admin_id: nullable(values, "admin_id", as_text),
+            credential_id: nullable(values, "credential_id", as_text),
+            binding_id: nullable(values, "binding_id", as_text),
+            revoked_credential_count: nullable(values, "revoked_credential_count", as_integer),
+            revoked_credential_ids: nullable(values, "revoked_credential_ids", as_ids),
+            enrolled_state: nullable(values, "enrolled_state", enrolled_state),
+            enrolled_admin_id: nullable(values, "enrolled_admin_id", as_text),
+            enrolled_credential_id: nullable(values, "enrolled_credential_id", as_text),
+            enrolled_trust_anchor_sha256: nullable(values, "enrolled_trust_anchor_sha256", as_hex),
+        })),
         other => panic!("no success shape {other}"),
     }
 }
@@ -257,6 +330,11 @@ fn local_wire_fixture_envelope_matches_the_crate() {
         framing["max_reply_bytes"],
         u64::try_from(MAX_REPLY_BYTES).unwrap()
     );
+    assert_eq!(
+        framing["max_revoked_ids_per_reply"],
+        u64::try_from(MAX_REVOKED_IDS_PER_REPLY).unwrap()
+    );
+    assert_eq!(MAX_REVOKED_IDS_PER_REPLY, 1000);
     assert_eq!(text(&fixture, "op_member"), "op");
     let ops: BTreeSet<&str> = fixture["ops"]
         .as_object()
@@ -304,16 +382,24 @@ fn local_wire_fixture_envelope_matches_the_crate() {
             .iter()
             .map(|pair| pair[1].as_str().unwrap())
             .collect();
-        assert!(
-            types.is_subset(&BTreeSet::from([
-                "string",
-                "integer",
-                "hex",
-                "string_list",
-                "code"
-            ])),
-            "{name}: {types:?}"
-        );
+        let known = |kind: &str| {
+            TYPES.contains(&kind)
+                || kind
+                    .strip_suffix("|null")
+                    .is_some_and(|base| base != "code" && TYPES.contains(&base))
+        };
+        assert!(types.iter().all(|kind| known(kind)), "{name}: {types:?}");
+        // Only the status reply has nullable members; all of its members
+        // but the first are.
+        let nullable: Vec<bool> = list(shape, "members")
+            .iter()
+            .map(|pair| pair[1].as_str().unwrap().ends_with("|null"))
+            .collect();
+        if op == Some(Op::Status) {
+            assert!(!nullable[0] && nullable[1..].iter().all(|n| *n), "{name}");
+        } else {
+            assert!(nullable.iter().all(|n| !n), "{name}");
+        }
     }
 }
 
@@ -466,6 +552,11 @@ fn unknown_replies_are_unknown() {
 /// under the bootstrap recovery key; the preview and the restore name the
 /// plan's replacement, the next epoch and revision, and revoke the first
 /// operator's credential; the replay and the second bootstrap are refused.
+/// The `status` steps: before the bootstrap, nothing; after it, the
+/// bootstrap's instance, recovery key and mTLS key enrolled with the
+/// SHA-256 of its trust anchor reference (the bootstrap reconcile all
+/// equal); after the restore, `restored` with the restore's replacement,
+/// count and page, then an empty page after its last ID.
 #[test]
 fn the_golden_exchange_holds_together() {
     let fixture = wire_fixture();
@@ -487,16 +578,54 @@ fn the_golden_exchange_holds_together() {
         outcomes.push((request_of(request), outcome));
     }
     let [
+        (Request::Status(asked_nothing), Ok(Reply::Status(nothing))),
         (Request::Bootstrap(bootstrap), Ok(Reply::Bootstrapped(bootstrapped))),
+        (Request::Status(asked_key), Ok(Reply::Status(enrolled))),
         (Request::IssueChallenge(issue), Ok(Reply::Issued(issued))),
         (Request::Preview(preview), Ok(Reply::Previewed(previewed))),
         (Request::Restore(restore), Ok(Reply::Restored(restored))),
+        (Request::Status(asked_operation), Ok(Reply::Status(after_restore))),
+        (Request::Status(asked_next), Ok(Reply::Status(next_page))),
         (Request::Restore(replay), Err(CallError::Refused(ErrorCode::NotRestorable))),
         (Request::Bootstrap(again), Err(CallError::Refused(ErrorCode::Conflict))),
     ] = outcomes.as_slice()
     else {
         panic!("the steps: {outcomes:?}");
     };
+    // Before the bootstrap: nothing asked, nothing there.
+    assert!(*asked_nothing == StatusRequest::default());
+    assert!(
+        **nothing
+            == Status {
+                server_time: now,
+                ..empty_status()
+            }
+    );
+    // After it: the bootstrap reconcile's members all equal the request's.
+    assert!(
+        *asked_key
+            == StatusRequest {
+                credential_spki: Some(bootstrap.credential_spki.clone()),
+                ..StatusRequest::default()
+            }
+    );
+    assert!(
+        **enrolled
+            == Status {
+                server_time: now,
+                instance_id: Some(bootstrap.instance_id.clone()),
+                recovery_key_epoch: Some(bootstrapped.recovery_key_epoch),
+                recovery_state_revision: Some(issued.expected_revision),
+                recovery_public_key: Some(bootstrap.recovery_public_key.as_bytes().to_vec()),
+                enrolled_state: Some(EnrolledState::Enabled),
+                enrolled_admin_id: Some(bootstrapped.admin_id.clone()),
+                enrolled_credential_id: Some(bootstrapped.credential_id.clone()),
+                enrolled_trust_anchor_sha256: Some(
+                    Sha256::digest(bootstrap.trust_anchor_ref.as_bytes()).to_vec()
+                ),
+                ..empty_status()
+            }
+    );
     assert_eq!(bootstrapped.instance_id, bootstrap.instance_id);
     let challenge = parse_challenge(&issued.challenge).unwrap();
     assert_eq!(challenge.operation_id(), issued.operation_id);
@@ -560,7 +689,73 @@ fn the_golden_exchange_holds_together() {
         restored.recovery_state_revision,
         issued.expected_revision + 1
     );
+    assert_eq!(restored.revoked_credential_count, 1);
+    // After the restore: restored, with what the restore's reply said.
+    assert!(
+        *asked_operation
+            == StatusRequest {
+                operation_id: Some(issued.operation_id.clone()),
+                ..StatusRequest::default()
+            }
+    );
+    let restored_status = Status {
+        server_time: now,
+        instance_id: Some(bootstrap.instance_id.clone()),
+        recovery_key_epoch: Some(restored.recovery_key_epoch),
+        recovery_state_revision: Some(restored.recovery_state_revision),
+        recovery_public_key: Some(issue.new_recovery_public_key.as_bytes().to_vec()),
+        operation_state: Some(OperationState::Restored),
+        expires_at: Some(issued.expires_at),
+        restored_at: Some(now),
+        admin_id: Some(restored.admin_id.clone()),
+        credential_id: Some(restored.credential_id.clone()),
+        binding_id: Some(restored.binding_id.clone()),
+        revoked_credential_count: Some(restored.revoked_credential_count),
+        revoked_credential_ids: Some(restored.revoked_credential_ids.clone()),
+        ..empty_status()
+    };
+    assert!(**after_restore == restored_status);
+    // The next page after the last ID held: empty.
+    assert!(
+        *asked_next
+            == StatusRequest {
+                operation_id: Some(issued.operation_id.clone()),
+                revoked_after: restored.revoked_credential_ids.last().cloned(),
+                ..StatusRequest::default()
+            }
+    );
+    assert!(
+        **next_page
+            == Status {
+                revoked_credential_ids: Some(Vec::new()),
+                ..restored_status
+            }
+    );
     assert_eq!(again, bootstrap);
+}
+
+/// A `status` reply with every member `null` but `server_time`, which is 0.
+fn empty_status() -> Status {
+    Status {
+        server_time: 0,
+        instance_id: None,
+        recovery_key_epoch: None,
+        recovery_state_revision: None,
+        recovery_public_key: None,
+        operation_state: None,
+        expires_at: None,
+        settles_at: None,
+        restored_at: None,
+        admin_id: None,
+        credential_id: None,
+        binding_id: None,
+        revoked_credential_count: None,
+        revoked_credential_ids: None,
+        enrolled_state: None,
+        enrolled_admin_id: None,
+        enrolled_credential_id: None,
+        enrolled_trust_anchor_sha256: None,
+    }
 }
 
 /// A request line of exactly [`MAX_REQUEST_BYTES`] with its newline is
@@ -572,7 +767,7 @@ fn the_request_limit_is_64_kib_with_the_newline() {
         "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
     )
     .unwrap();
-    let make: [&dyn Fn(String) -> Request; 5] = [
+    let make: [&dyn Fn(String) -> Request; 7] = [
         &|text| {
             Request::Bootstrap(BootstrapRequest {
                 instance_id: text,
@@ -606,6 +801,19 @@ fn the_request_limit_is_64_kib_with_the_newline() {
             Request::Restore(ResponseRequest {
                 operation_id: text,
                 signature: [7; 64],
+            })
+        },
+        &|text| {
+            Request::Status(StatusRequest {
+                operation_id: Some(text),
+                ..StatusRequest::default()
+            })
+        },
+        &|text| {
+            Request::Status(StatusRequest {
+                operation_id: Some("o".into()),
+                credential_spki: Some(vec![0x30]),
+                revoked_after: Some(text),
             })
         },
     ];
@@ -715,6 +923,13 @@ fn oversized_values_are_refused_before_the_line_is_built() {
             signature: [7; 64],
         })
     };
+    let status = |operation_id: usize, spki: usize, after: usize| {
+        Request::Status(StatusRequest {
+            operation_id: Some("o".repeat(operation_id)),
+            credential_spki: Some(vec![0xab; spki]),
+            revoked_after: Some("r".repeat(after)),
+        })
+    };
     let half = MAX_REQUEST_BYTES / 2;
     let early = [
         bootstrap(1, LARGE, 1),
@@ -724,6 +939,9 @@ fn oversized_values_are_refused_before_the_line_is_built() {
         issue(1, LARGE),
         preview(LARGE),
         restore(LARGE),
+        status(LARGE, 0, 0),
+        status(0, LARGE, 0),
+        status(0, 0, LARGE),
         // The values alone one byte over the limit.
         bootstrap(1, half, 0),
         bootstrap(0, half, 1),
@@ -732,6 +950,9 @@ fn oversized_values_are_refused_before_the_line_is_built() {
         issue(0, MAX_REQUEST_BYTES + 1),
         preview(MAX_REQUEST_BYTES + 1),
         restore(MAX_REQUEST_BYTES + 1),
+        status(1, half, 0),
+        status(0, half, 1),
+        status(MAX_REQUEST_BYTES, 0, 1),
     ];
     for request in early {
         assert_eq!(request.encode(), Err(NotSent::TooLarge), "{request:?}");
@@ -742,6 +963,8 @@ fn oversized_values_are_refused_before_the_line_is_built() {
         issue(half, 0),
         preview(MAX_REQUEST_BYTES),
         restore(MAX_REQUEST_BYTES),
+        status(0, half, 0),
+        status(MAX_REQUEST_BYTES, 0, 0),
     ] {
         assert_eq!(request.encode(), Err(NotSent::TooLarge), "{request:?}");
     }
@@ -769,8 +992,14 @@ fn request_strings_are_escaped_as_serde_json_escapes_them() {
             operation_id: every.clone(),
             signature: [0xff; 64],
         }),
+        Request::Status(StatusRequest {
+            operation_id: Some(every.clone()),
+            credential_spki: Some(vec![0, 1, 0xfe, 0xff]),
+            revoked_after: Some(every.clone()),
+        }),
+        Request::Status(StatusRequest::default()),
     ];
-    let [bootstrap, restore] = &requests;
+    let [bootstrap, restore, status, empty] = &requests;
     let expected = [
         line_of(&[
             ("op", "bootstrap".into()),
@@ -784,8 +1013,23 @@ fn request_strings_are_escaped_as_serde_json_escapes_them() {
             ("operation_id", every.clone().into()),
             ("signature", "ff".repeat(64).into()),
         ]),
+        line_of(&[
+            ("op", "status".into()),
+            ("operation_id", every.clone().into()),
+            ("credential_spki", "0001feff".into()),
+            ("revoked_after", every.clone().into()),
+        ]),
+        line_of(&[
+            ("op", "status".into()),
+            ("operation_id", Value::Null),
+            ("credential_spki", Value::Null),
+            ("revoked_after", Value::Null),
+        ]),
     ];
-    for (request, expected) in [bootstrap, restore].into_iter().zip(expected) {
+    for (request, expected) in [bootstrap, restore, status, empty]
+        .into_iter()
+        .zip(expected)
+    {
         let line = request.encode().unwrap();
         assert_eq!(
             String::from_utf8(line.as_bytes().to_vec()).unwrap(),
@@ -803,11 +1047,12 @@ fn request_strings_are_escaped_as_serde_json_escapes_them() {
 fn replies_with_escapes_lists_and_extremes_parse() {
     let mut every: String = (0..0x80u8).map(char::from).collect();
     every.push_str("\u{85}\u{e9}\u{2028}\u{1f511}");
-    let restored = |revoked: &[&str], epoch: i64, revision: i64| {
+    let restored = |count: i64, revoked: &[&str], epoch: i64, revision: i64| {
         let line = line_of(&[
             ("admin_id", every.clone().into()),
             ("credential_id", "c".into()),
             ("binding_id", "".into()),
+            ("revoked_credential_count", count.into()),
             ("revoked_credential_ids", revoked.into()),
             ("recovery_key_epoch", epoch.into()),
             ("recovery_state_revision", revision.into()),
@@ -816,20 +1061,122 @@ fn replies_with_escapes_lists_and_extremes_parse() {
             admin_id: every.clone(),
             credential_id: "c".into(),
             binding_id: String::new(),
+            revoked_credential_count: count,
             revoked_credential_ids: revoked.iter().map(|id| (*id).to_owned()).collect(),
             recovery_key_epoch: epoch,
             recovery_state_revision: revision,
         });
         (line, expected)
     };
+    // The IDs in byte order, the only order the parser takes.
+    let mut sorted = vec!["a", every.as_str(), "\"", ""];
+    sorted.sort_unstable();
     for (line, expected) in [
-        restored(&[], i64::MAX, i64::MIN),
-        restored(&["a", every.as_str(), "\"", ""], 0, -1),
+        restored(i64::MIN, &[], i64::MAX, i64::MIN),
+        // The parser does not check the list against the count.
+        restored(i64::MAX, &sorted, 0, -1),
     ] {
         assert_eq!(
             parse_reply(Op::Restore, line.as_bytes()),
             Ok(expected),
             "{line}"
+        );
+    }
+    // A status reply: every nullable member with a value at its extreme, or
+    // with escapes, then every one null.
+    let status = Status {
+        server_time: i64::MIN,
+        instance_id: Some(every.clone()),
+        recovery_key_epoch: Some(i64::MAX),
+        recovery_state_revision: Some(-1),
+        recovery_public_key: Some(vec![0, 0xff]),
+        operation_state: Some(OperationState::Expiring),
+        expires_at: Some(0),
+        settles_at: Some(i64::MAX),
+        restored_at: Some(i64::MIN),
+        admin_id: Some(String::new()),
+        credential_id: Some("\"".into()),
+        binding_id: Some(every.clone()),
+        revoked_credential_count: Some(0),
+        revoked_credential_ids: Some(sorted.iter().map(|id| (*id).to_owned()).collect()),
+        enrolled_state: Some(EnrolledState::Disabled),
+        enrolled_admin_id: Some(every.clone()),
+        enrolled_credential_id: Some(String::new()),
+        enrolled_trust_anchor_sha256: Some(Vec::new()),
+    };
+    let line = line_of(&[
+        ("server_time", i64::MIN.into()),
+        ("instance_id", every.clone().into()),
+        ("recovery_key_epoch", i64::MAX.into()),
+        ("recovery_state_revision", (-1).into()),
+        ("recovery_public_key", "00ff".into()),
+        ("operation_state", "expiring".into()),
+        ("expires_at", 0.into()),
+        ("settles_at", i64::MAX.into()),
+        ("restored_at", i64::MIN.into()),
+        ("admin_id", "".into()),
+        ("credential_id", "\"".into()),
+        ("binding_id", every.clone().into()),
+        ("revoked_credential_count", 0.into()),
+        ("revoked_credential_ids", sorted.clone().into()),
+        ("enrolled_state", "disabled".into()),
+        ("enrolled_admin_id", every.clone().into()),
+        ("enrolled_credential_id", "".into()),
+        ("enrolled_trust_anchor_sha256", "".into()),
+    ]);
+    assert_eq!(
+        parse_reply(Op::Status, line.as_bytes()),
+        Ok(Reply::Status(Box::new(status)))
+    );
+    let nulls = line_of(&[
+        ("server_time", 0.into()),
+        ("instance_id", Value::Null),
+        ("recovery_key_epoch", Value::Null),
+        ("recovery_state_revision", Value::Null),
+        ("recovery_public_key", Value::Null),
+        ("operation_state", Value::Null),
+        ("expires_at", Value::Null),
+        ("settles_at", Value::Null),
+        ("restored_at", Value::Null),
+        ("admin_id", Value::Null),
+        ("credential_id", Value::Null),
+        ("binding_id", Value::Null),
+        ("revoked_credential_count", Value::Null),
+        ("revoked_credential_ids", Value::Null),
+        ("enrolled_state", Value::Null),
+        ("enrolled_admin_id", Value::Null),
+        ("enrolled_credential_id", Value::Null),
+        ("enrolled_trust_anchor_sha256", Value::Null),
+    ]);
+    assert_eq!(
+        parse_reply(Op::Status, nulls.as_bytes()),
+        Ok(Reply::Status(Box::new(empty_status())))
+    );
+    // Every state value is read.
+    for state in OperationState::ALL {
+        let line = nulls.replace(
+            "\"operation_state\":null",
+            &format!("\"operation_state\":\"{}\"", state.as_str()),
+        );
+        assert!(
+            matches!(
+                parse_reply(Op::Status, line.as_bytes()),
+                Ok(Reply::Status(read)) if read.operation_state == Some(state)
+            ),
+            "{state:?}"
+        );
+    }
+    for state in EnrolledState::ALL {
+        let line = nulls.replace(
+            "\"enrolled_state\":null",
+            &format!("\"enrolled_state\":\"{}\"", state.as_str()),
+        );
+        assert!(
+            matches!(
+                parse_reply(Op::Status, line.as_bytes()),
+                Ok(Reply::Status(read)) if read.enrolled_state == Some(state)
+            ),
+            "{state:?}"
         );
     }
     let issued = line_of(&[
@@ -891,34 +1238,111 @@ fn the_reply_cap_is_4_mib_with_the_newline() {
     );
 }
 
-/// A restore that revoked a few thousand credentials (the service revokes
-/// them all) answers with a reply over 64 KiB and under the cap: it is read
-/// as the restore it is, not as an unknown outcome.
+/// A restore reply or a `status` page of exactly
+/// [`MAX_REVOKED_IDS_PER_REPLY`] revoked IDs, in byte order, is read (the
+/// count beyond it: the rest is paged by `status`); one more ID is
+/// malformed, an unknown outcome, and so is a reply up to the reply cap of
+/// empty strings. The parser checks the bound and the order within the
+/// reply only, not the list against the count.
 #[test]
-fn a_restore_reply_with_thousands_of_revoked_ids_is_read() {
-    let revoked: Vec<String> = (1..=3000)
-        .map(|n| format!("cred_0000000000000g{n:012}"))
-        .collect();
-    let line = line_of(&[
-        ("admin_id", "adm_0000000000000g000000000001".into()),
-        ("credential_id", "cred_0000000000000g000000009999".into()),
-        ("binding_id", "role_0000000000000g000000000002".into()),
-        ("revoked_credential_ids", revoked.clone().into()),
-        ("recovery_key_epoch", 2.into()),
-        ("recovery_state_revision", 3.into()),
-    ]);
-    assert!(line.len() > 64 * 1024 && line.len() < MAX_REPLY_BYTES);
+fn a_reply_lists_at_most_a_page_of_revoked_ids() {
+    let ids = |n: usize| -> Vec<String> {
+        (1..=n)
+            .map(|n| format!("cred_0000000000000g{n:012}"))
+            .collect()
+    };
+    let restored = |revoked: &[String]| {
+        line_of(&[
+            ("admin_id", "adm_0000000000000g000000000001".into()),
+            ("credential_id", "cred_0000000000000g000000009999".into()),
+            ("binding_id", "role_0000000000000g000000000002".into()),
+            ("revoked_credential_count", 2001.into()),
+            ("revoked_credential_ids", revoked.into()),
+            ("recovery_key_epoch", 2.into()),
+            ("recovery_state_revision", 3.into()),
+        ])
+    };
+    let page = ids(MAX_REVOKED_IDS_PER_REPLY);
+    let line = restored(&page);
+    assert!(line.len() < 64 * 1024, "{}", line.len());
     assert_eq!(
         parse_reply(Op::Restore, line.as_bytes()),
         Ok(Reply::Restored(Restored {
             admin_id: "adm_0000000000000g000000000001".into(),
             credential_id: "cred_0000000000000g000000009999".into(),
             binding_id: "role_0000000000000g000000000002".into(),
-            revoked_credential_ids: revoked,
+            revoked_credential_count: 2001,
+            revoked_credential_ids: page.clone(),
             recovery_key_epoch: 2,
             recovery_state_revision: 3,
         }))
     );
+    let malformed = Err(CallError::Unknown(UnknownOutcome::Malformed));
+    let over = ids(MAX_REVOKED_IDS_PER_REPLY + 1);
+    assert_eq!(
+        parse_reply(Op::Restore, restored(&over).as_bytes()),
+        malformed
+    );
+    // Out of order or repeated anywhere in the page: the last two swapped,
+    // the first repeated at the end, the last repeated right after itself.
+    let mut swapped = page.clone();
+    swapped.swap(998, 999);
+    let mut repeated = page[..999].to_vec();
+    repeated.push(page[0].clone());
+    let mut twice = page[..999].to_vec();
+    twice.push(page[998].clone());
+    for list in [&swapped, &repeated, &twice] {
+        assert_eq!(
+            parse_reply(Op::Restore, restored(list).as_bytes()),
+            malformed
+        );
+    }
+    // A reply up to the 4 MiB cap of empty strings: repeated from the
+    // second, read no further than that.
+    let base = restored(&[]).len();
+    let empties = vec![String::new(); (MAX_REPLY_BYTES - base + 1) / 3];
+    let line = restored(&empties);
+    assert!(line.len() <= MAX_REPLY_BYTES && line.len() + 3 > MAX_REPLY_BYTES);
+    assert_eq!(parse_reply(Op::Restore, line.as_bytes()), malformed);
+
+    let status = |revoked: &[String]| {
+        let mut members = vec![("server_time", Value::from(1))];
+        members.extend(
+            [
+                "instance_id",
+                "recovery_key_epoch",
+                "recovery_state_revision",
+                "recovery_public_key",
+                "operation_state",
+                "expires_at",
+                "settles_at",
+                "restored_at",
+                "admin_id",
+                "credential_id",
+                "binding_id",
+                "revoked_credential_count",
+            ]
+            .map(|name| (name, Value::Null)),
+        );
+        members.push(("revoked_credential_ids", revoked.into()));
+        members.extend(
+            [
+                "enrolled_state",
+                "enrolled_admin_id",
+                "enrolled_credential_id",
+                "enrolled_trust_anchor_sha256",
+            ]
+            .map(|name| (name, Value::Null)),
+        );
+        line_of(&members)
+    };
+    assert!(matches!(
+        parse_reply(Op::Status, status(&page).as_bytes()),
+        Ok(Reply::Status(read)) if read.revoked_credential_ids.as_ref() == Some(&page)
+    ));
+    for list in [&over, &swapped, &repeated, &twice] {
+        assert_eq!(parse_reply(Op::Status, status(list).as_bytes()), malformed);
+    }
 }
 
 /// No sentinel value of a request, a reply or a line is shown by `Debug`
@@ -946,11 +1370,17 @@ fn debug_and_display_show_no_value() {
         trust_anchor_ref: "SENTINEL-ANCHOR".into(),
         new_recovery_public_key: key,
     };
+    let status_request = StatusRequest {
+        operation_id: Some("SENTINEL-OPERATION".into()),
+        credential_spki: Some(vec![0xc7; 44]),
+        revoked_after: Some("SENTINEL-AFTER".into()),
+    };
     let requests = [
         Request::Bootstrap(bootstrap.clone()),
         Request::IssueChallenge(issue.clone()),
         Request::Preview(response.clone()),
         Request::Restore(response.clone()),
+        Request::Status(status_request.clone()),
     ];
     let lines: Vec<_> = requests
         .iter()
@@ -981,9 +1411,30 @@ fn debug_and_display_show_no_value() {
         admin_id: id(),
         credential_id: id(),
         binding_id: id(),
+        revoked_credential_count: 1,
         revoked_credential_ids: vec![id()],
         recovery_key_epoch: 2,
         recovery_state_revision: 2,
+    };
+    let status = Status {
+        server_time: 1,
+        instance_id: Some(id()),
+        recovery_key_epoch: Some(1),
+        recovery_state_revision: Some(1),
+        recovery_public_key: Some(vec![0x5a; 32]),
+        operation_state: Some(OperationState::Restored),
+        expires_at: Some(1),
+        settles_at: Some(1),
+        restored_at: Some(1),
+        admin_id: Some(id()),
+        credential_id: Some(id()),
+        binding_id: Some(id()),
+        revoked_credential_count: Some(1),
+        revoked_credential_ids: Some(vec![id()]),
+        enrolled_state: Some(EnrolledState::Enabled),
+        enrolled_admin_id: Some(id()),
+        enrolled_credential_id: Some(id()),
+        enrolled_trust_anchor_sha256: Some(vec![0xc7; 32]),
     };
     let mut shown: Vec<(String, String)> = Vec::new();
     let mut debug = |value: &dyn std::fmt::Debug, expected: &str| {
@@ -993,11 +1444,13 @@ fn debug_and_display_show_no_value() {
     debug(&bootstrap, "BootstrapRequest(..)");
     debug(&issue, "IssueChallengeRequest(..)");
     debug(&response, "ResponseRequest(..)");
+    debug(&status_request, "StatusRequest(..)");
     for (request, expected) in requests.iter().zip([
         "Request::Bootstrap(..)",
         "Request::IssueChallenge(..)",
         "Request::Preview(..)",
         "Request::Restore(..)",
+        "Request::Status(..)",
     ]) {
         debug(request, expected);
     }
@@ -1009,11 +1462,13 @@ fn debug_and_display_show_no_value() {
     debug(&issued, "Issued(..)");
     debug(&previewed, "Previewed(..)");
     debug(&restored, "Restored(..)");
+    debug(&status, "Status(..)");
     for (reply, expected) in [
         (Reply::Bootstrapped(bootstrapped), "Reply::Bootstrapped(..)"),
         (Reply::Issued(issued), "Reply::Issued(..)"),
         (Reply::Previewed(previewed), "Reply::Previewed(..)"),
         (Reply::Restored(restored), "Reply::Restored(..)"),
+        (Reply::Status(Box::new(status)), "Reply::Status(..)"),
     ] {
         debug(&reply, expected);
     }
@@ -1069,7 +1524,16 @@ fn the_local_module_names_no_signer() {
         files.push(path.file_name().unwrap().to_str().unwrap().to_owned());
     }
     files.sort();
-    assert_eq!(files, ["exchange.rs", "mod.rs", "path.rs", "wire.rs"]);
+    assert_eq!(
+        files,
+        [
+            "exchange.rs",
+            "mod.rs",
+            "path.rs",
+            "reconcile.rs",
+            "wire.rs"
+        ]
+    );
 }
 
 /// The members of a fixture object.
@@ -1144,7 +1608,12 @@ fn every_wire_fixture_file_and_case_is_covered() {
     );
     assert_eq!(
         members(&fixture["framing"]),
-        BTreeSet::from(["line_end", "max_request_bytes", "max_reply_bytes"])
+        BTreeSet::from([
+            "line_end",
+            "max_request_bytes",
+            "max_reply_bytes",
+            "max_revoked_ids_per_reply"
+        ])
     );
     // Read by `local_exchange` (`default_timeouts_are_the_servers_defaults`).
     assert_eq!(

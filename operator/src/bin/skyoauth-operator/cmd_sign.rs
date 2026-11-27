@@ -51,16 +51,25 @@ fn sign(flags: &Sign) -> Result<String, Failure> {
     };
     let verified = check_challenge(&challenge, &expectations)
         .map_err(|refusal| Failure::Refused(format!("refused ({refusal:?}): {refusal}")))?;
-    // The signer lives in this block only: it is not wiped, but not kept
-    // either.
+    // The seed and the signer live in this block only, and neither is
+    // moved or copied by value: the seed is a `seed_file::Seed`, read in
+    // place, which `from_seed` borrows and wipes in place once the signing
+    // key is made (and which is wiped again on drop); the signer stays in
+    // its `Result`, borrowed, and its signing key is wiped when the block
+    // ends, on every return.
     let signed = {
-        let signer =
-            SoftwareSigner::from_seed(seed_file::read(&flags.seed_file)?).map_err(|err| {
-                Failure::Refused(format!(
+        let mut seed = seed_file::Seed::default();
+        seed_file::read(&flags.seed_file, &mut seed)?;
+        let signer = SoftwareSigner::from_seed(&mut seed);
+        let signer = match &signer {
+            Ok(signer) => signer,
+            Err(err) => {
+                return Err(Failure::Refused(format!(
                     "--seed-file: the seed's public key is refused ({err:?}): {err}"
-                ))
-            })?;
-        sign_challenge(&verified, &signer)
+                )));
+            }
+        };
+        sign_challenge(&verified, signer)
             .map_err(|err| Failure::Refused(format!("refused ({err:?}): {err}")))?
     };
     let response = response_artifact(&signed)?;

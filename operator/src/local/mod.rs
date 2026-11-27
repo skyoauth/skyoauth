@@ -1,8 +1,8 @@
 //! The wire codec of the service's deployment-local bootstrap and recovery
 //! transport (T13.4, T13.5; the service's `local_transport` module, whose
 //! wire format is this module's contract): the request line the client
-//! writes and the reply line it reads, for the four operations
-//! `bootstrap`, `issue_challenge`, `preview` and `restore`.
+//! writes and the reply line it reads, for the five operations
+//! `bootstrap`, `issue_challenge`, `preview`, `restore` and `status`.
 //!
 //! The codec turns a [`Request`] into the exact bytes to write
 //! ([`Request::encode`]) and the bytes read back into a [`Reply`], a
@@ -67,16 +67,16 @@
 //!   client's call ([`LocalClient`]) reports these two codes as
 //!   an unknown outcome ([`CallError::Unknown`], carrying the wire code)
 //!   for `bootstrap`, `issue_challenge` and `restore`, and as
-//!   [`CallError::Refused`] only for `preview`, which writes nothing:
-//!   after a write, reconcile first;
+//!   [`CallError::Refused`] only for `preview` and `status`, which write
+//!   nothing: after a write, reconcile first;
 //! - **not sent** ([`CallError::NotSent`]): nothing was written to the
 //!   server, so nothing happened there;
 //! - **unknown** ([`CallError::Unknown`]): anything else. A missing,
 //!   truncated, oversized or malformed reply, bytes after its newline, a
 //!   second line, a refusal with a code outside the closed set: the
 //!   request may or may not have been served, and a bootstrap, an issue or
-//!   a restore may have committed. **Do not proceed: reconcile first** (read the
-//!   recovery state and the operator through another channel), then decide.
+//!   a restore may have committed. **Do not proceed: reconcile first**
+//!   (see "Reconciling"), then decide.
 //!
 //! **The client never retries on its own**, after any outcome. Once a
 //! first bootstrap committed, a repeat of it is answered `conflict`; once
@@ -84,8 +84,75 @@
 //! `not_restorable` (the service's docs, "Transactions"): the repeat's
 //! answer looks like a refusal and hides the first call's success. Once a
 //! first issue committed, a repeat of it makes a second live challenge
-//! (the first expires unused). No write is safe to repeat without
-//! reconciling first, `issue_challenge` included.
+//! (the first expires unused). No write is safe to repeat blindly
+//! ([`Op::retry`]): a bootstrap or a restore is reconciled first; an
+//! `issue_challenge` cannot be reconciled (the client never received its
+//! operation ID), so after an unknown outcome the operator issues again,
+//! and the first challenge, if it committed, expires unused (lead ruling,
+//! Q5).
+//!
+//! # Reconciling
+//!
+//! The transport's `status` ([`LocalClient::status`]) changes no row and
+//! reads what decides a write whose outcome is unknown
+//! (`docs/proposals/local-read-operation.md`, "Finality, the 100 s wait,
+//! and the reconcile procedure"). It is one more request with the same
+//! bounds and cannot see the listen queue, where a request the client gave
+//! up on may still wait, so only the operation states `not_found`,
+//! `restored`, `revoked` and `retired` are final, and a recovery state
+//! once reported (bootstrap closes once). The client still never retries
+//! on its own; the operator follows this procedure:
+//!
+//! - **`restore`, outcome unknown:** `status` with its operation ID
+//!   ([`StatusRequest::reconciling_restore`]), decided by
+//!   [`RestoreVerdict::of`]. `restored`: it committed; the reply has the
+//!   replacement's IDs, and the revoked IDs page by `revoked_after`
+//!   ([`LocalClient::revoked_credential_ids`]). The verdict is decided by the state alone: the
+//!   replacement's IDs are not part of the reconcile decision, they are
+//!   reported, not checked. `retired`, `revoked`: it
+//!   did not commit and never will; issue a new challenge. `issued`:
+//!   repeat the same restore, which is single use: it restores, or is
+//!   `not_restorable` because the first one committed, which the next
+//!   `status` shows. `expiring`: ask again after `settles_at`. `expired`:
+//!   it did not commit through this transport; issue a new challenge (the
+//!   old one is not final: if it is restored after all, it rotates the
+//!   epoch, so the new one's restore is `not_restorable` and `status` on
+//!   the old one shows `restored`). `not_found`, or no state: do not
+//!   proceed. **After any retry** (lead ruling (c)), a `conflict` from the
+//!   new issue (a late restore has enrolled the replacement's key) or a
+//!   `not_restorable` from the repeated or new restore means: query the
+//!   **original** operation ID again and act on the state it reports; a
+//!   late restore can commit after `expired` was seen.
+//! - **`bootstrap`, outcome unknown** (lead rulings F4 and (b)): `status`
+//!   with the bootstrap's mTLS key, the same DER bytes it sent
+//!   ([`StatusRequest::reconciling_bootstrap`]), decided by
+//!   [`BootstrapVerdict::of`]. The instance ID, the recovery public key,
+//!   the mTLS key (enrolled, in any state) and the SHA-256 of the trust
+//!   anchor reference (of the UTF-8 bytes of the value sent, not its
+//!   escaped wire form) all equal the request's: the current state matches
+//!   it, consistent with it having committed; do not repeat it. Which
+//!   request won is not known, `status` shows neither the operator's
+//!   status nor its role, and the key may have been enrolled by a later
+//!   write: the credential is usable only when it is `enabled`. No
+//!   recovery state: repeat the same bootstrap, which the database closes
+//!   once. Anything else: the current state does not match; do not claim
+//!   the bootstrap committed, and stop (with an equal instance and another
+//!   recovery key, the recovery key the operator holds cannot restore this
+//!   instance).
+//! - **`issue_challenge`, outcome unknown:** no reconcile possible: issue
+//!   again. A stray challenge expires unused, and any restore retires the
+//!   others. [`Op::retry`] stays [`Retry::ReconcileFirst`] for it (lead
+//!   ruling, Q5): it writes a row and an audit event.
+//!
+//! A successful `restore` reply lists at most [`MAX_REVOKED_IDS_PER_REPLY`]
+//! of the IDs it revoked, the first in byte order, with their count; the
+//! list is complete exactly when its length equals the count, and
+//! [`LocalClient::revoked_credential_ids`] reads the rest with `status`,
+//! checking the pages against the count and each other; its list holds at
+//! least the largest count seen in the walk and every ID of the restore
+//! reply's list. The walk has no overall bound beyond each call's own time
+//! limits: a hostile server on the already trusted socket could keep it
+//! going.
 //!
 //! # Key material
 //!
@@ -109,6 +176,7 @@
 mod exchange;
 #[cfg(unix)]
 mod path;
+mod reconcile;
 mod wire;
 
 use std::{fmt, io};
@@ -123,6 +191,7 @@ pub use path::{
     AncestorTrust, CheckedSocket, CheckedSocketPath, MAX_SOCKET_PATH_BYTES, MAX_SYMLINKS,
     PathError, PathProblem, SOCKET_MODE, SocketExpectations, check_socket,
 };
+pub use reconcile::{BootstrapVerdict, RestoreVerdict};
 pub use wire::parse_reply;
 
 use crate::recovery::RecoveryPublicKey;
@@ -132,22 +201,24 @@ use crate::recovery::RecoveryPublicKey;
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 /// The largest reply line [`parse_reply`] reads, its newline included:
-/// 4 MiB. Inferred: the service sets no bound on its replies, and one of
-/// them has none of its own: a restore's `revoked_credential_ids` lists
-/// every credential the restore revoked (all of them), some 34 bytes per
-/// ID, so a reply over 64 KiB takes fewer than 2000 credentials. The cap
-/// is not a limit of the protocol: it only bounds what the client holds
-/// (it reads the whole reply before parsing it) when the peer misbehaves,
-/// and 4 MiB holds some 120,000 revoked IDs. A reply over it is
+/// 4 MiB. The service bounds every reply: the one list a reply carries,
+/// the revoked credential IDs of a `restore` or a `status`, holds at most
+/// [`MAX_REVOKED_IDS_PER_REPLY`] IDs, and the largest reply the database
+/// allows (IDs of 255 control characters, each written as a six-byte
+/// escape, and the largest recovery key) is some 1.56 MB. The cap only
+/// bounds what the client holds (it reads the whole reply before parsing
+/// it) when the peer misbehaves. A reply over it is
 /// [`UnknownOutcome::TooLarge`]: the request may have been served, a
 /// restore may have committed, so reconcile first. A request line stays
 /// at most [`MAX_REQUEST_BYTES`].
-///
-/// Open question for the service and the design, not settled here: a
-/// reply with no bound of its own. The 4 MiB figure is arbitrary; a
-/// bounded reply format (a count, or the revoked IDs read some other way)
-/// would need a change to the service.
 pub const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
+
+/// The most revoked credential IDs one reply lists, the service's page
+/// size: a `restore` reply lists the first of them in byte order, a
+/// `status` reply the next page after its request's `revoked_after`
+/// (pinned by the fixture as `framing.max_revoked_ids_per_reply`).
+/// [`parse_reply`] takes a longer list as malformed.
+pub const MAX_REVOKED_IDS_PER_REPLY: usize = 1000;
 
 /// An operation of the transport, by its request's `op` member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -161,15 +232,19 @@ pub enum Op {
     Preview,
     /// `restore`: the restoration a signed response authorizes.
     Restore,
+    /// `status`: the recovery state, a recovery challenge's state and an
+    /// mTLS key's enrollment, for reconciling; changes no row.
+    Status,
 }
 
 impl Op {
     /// Every operation.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Bootstrap,
         Self::IssueChallenge,
         Self::Preview,
         Self::Restore,
+        Self::Status,
     ];
 
     /// The value of the request's `op` member.
@@ -179,6 +254,7 @@ impl Op {
             Self::IssueChallenge => "issue_challenge",
             Self::Preview => "preview",
             Self::Restore => "restore",
+            Self::Status => "status",
         }
     }
 }
@@ -339,6 +415,14 @@ pub enum UnknownOutcome {
     /// whose `operation_id`, `expires_at` or `expected_revision` is not its
     /// challenge's.
     ChallengeMismatch,
+    /// The pages of a restore's revoked credential IDs do not hold
+    /// together: a page of another length than its count leaves, an ID not
+    /// after the one before, a count that changed after the one restart,
+    /// a `status` that does not report the restore; or the list the walk
+    /// ends with is shorter than the largest count seen in the walk (the
+    /// restore reply's included), or lacks an ID of the restore reply's
+    /// list ([`LocalClient::revoked_credential_ids`]).
+    PageMismatch,
 }
 
 impl fmt::Display for UnknownOutcome {
@@ -354,6 +438,7 @@ impl fmt::Display for UnknownOutcome {
             Self::ConnectionLost(_) => "the connection failed before a reply could be believed",
             Self::UncertainCommit(_) => "a write failed in the store, maybe in its commit",
             Self::ChallengeMismatch => "the issued reply does not match its challenge",
+            Self::PageMismatch => "the pages of revoked credential IDs do not hold together",
         })
     }
 }
@@ -372,8 +457,8 @@ pub enum CallError {
     /// answered with one of these two, the client's call ([`LocalClient`])
     /// reports them as [`CallError::Unknown`], carrying the
     /// wire code, for `bootstrap`, `issue_challenge` and `restore`, and as
-    /// a refusal only for `preview`: after a write, reconcile first (see
-    /// the [module documentation](self), "Outcomes").
+    /// a refusal only for `preview` and `status`: after a write, reconcile
+    /// first (see the [module documentation](self), "Outcomes").
     Refused(ErrorCode),
     /// The request may or may not have been served: do not proceed;
     /// reconcile first. Never repeated by the client.
@@ -466,6 +551,30 @@ impl fmt::Debug for ResponseRequest {
     }
 }
 
+/// The values of a `status` request, each optional (sent as `null` when
+/// absent; every member is always written).
+///
+/// `Debug` prints `StatusRequest(..)`, none of the values.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct StatusRequest {
+    /// A recovery challenge's operation ID, whose state to report.
+    pub operation_id: Option<String>,
+    /// The DER `SubjectPublicKeyInfo` of an mTLS key, sent in lowercase
+    /// hexadecimal: the same bytes it was enrolled with (the public
+    /// identity is per encoding).
+    pub credential_spki: Option<Vec<u8>>,
+    /// The last revoked credential ID already held: the reply lists the
+    /// ones after it. Only with an `operation_id` (the server refuses it
+    /// alone with `invalid_request`).
+    pub revoked_after: Option<String>,
+}
+
+impl fmt::Debug for StatusRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StatusRequest(..)")
+    }
+}
+
 /// A request, by operation.
 ///
 /// `Debug` names the operation only, `Request::Restore(..)` say.
@@ -479,6 +588,8 @@ pub enum Request {
     Preview(ResponseRequest),
     /// `restore`.
     Restore(ResponseRequest),
+    /// `status`.
+    Status(StatusRequest),
 }
 
 impl fmt::Debug for Request {
@@ -488,6 +599,7 @@ impl fmt::Debug for Request {
             Self::IssueChallenge(_) => "Request::IssueChallenge(..)",
             Self::Preview(_) => "Request::Preview(..)",
             Self::Restore(_) => "Request::Restore(..)",
+            Self::Status(_) => "Request::Status(..)",
         })
     }
 }
@@ -500,6 +612,7 @@ impl Request {
             Self::IssueChallenge(_) => Op::IssueChallenge,
             Self::Preview(_) => Op::Preview,
             Self::Restore(_) => Op::Restore,
+            Self::Status(_) => Op::Status,
         }
     }
 }
@@ -594,6 +707,13 @@ pub struct Restored {
     pub admin_id: String,
     pub credential_id: String,
     pub binding_id: String,
+    /// How many credentials the restore revoked (exact absent a tie: the
+    /// service selects them by their `revoked_at`, the restore's time).
+    pub revoked_credential_count: i64,
+    /// The first of them in byte order, at most
+    /// [`MAX_REVOKED_IDS_PER_REPLY`] (the parser checks the bound and the
+    /// order, not the length against the count); the rest are read with
+    /// `status`.
     pub revoked_credential_ids: Vec<String>,
     pub recovery_key_epoch: i64,
     pub recovery_state_revision: i64,
@@ -602,6 +722,142 @@ pub struct Restored {
 impl fmt::Debug for Restored {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Restored(..)")
+    }
+}
+
+/// The state of a recovery challenge a `status` reports, in the order the
+/// service decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OperationState {
+    /// No recovery challenge has that ID (another kind of operation by that
+    /// ID included). Final.
+    NotFound,
+    /// The challenge was consumed by a restore that committed. Final.
+    Restored,
+    /// The challenge was revoked unconsumed. Final.
+    Revoked,
+    /// Unconsumed, but the recovery state has moved on (another restore):
+    /// it can never be restored. Final.
+    Retired,
+    /// Unconsumed and live: a restore of it may still succeed.
+    Issued,
+    /// Past its expiry, but a restore that read its time before the expiry
+    /// may still be running: ask again after `settles_at`.
+    Expiring,
+    /// Past its expiry and the transport's transaction timeout: it did not
+    /// commit through this transport. Not final (a writer with an earlier
+    /// time may still consume it).
+    Expired,
+}
+
+impl OperationState {
+    /// Every state, in the service's order.
+    pub const ALL: [Self; 7] = [
+        Self::NotFound,
+        Self::Restored,
+        Self::Revoked,
+        Self::Retired,
+        Self::Issued,
+        Self::Expiring,
+        Self::Expired,
+    ];
+
+    /// The wire value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Restored => "restored",
+            Self::Revoked => "revoked",
+            Self::Retired => "retired",
+            Self::Issued => "issued",
+            Self::Expiring => "expiring",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+/// The state of the credential with an mTLS key's public identity, as a
+/// `status` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EnrolledState {
+    /// No credential has that public identity.
+    NotFound,
+    /// The credential is enabled.
+    Enabled,
+    /// The credential is disabled.
+    Disabled,
+    /// The credential is revoked.
+    Revoked,
+}
+
+impl EnrolledState {
+    /// Every state.
+    pub const ALL: [Self; 4] = [Self::NotFound, Self::Enabled, Self::Disabled, Self::Revoked];
+
+    /// The wire value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
+/// The success of a `status`: every member, `None` where the service wrote
+/// `null`. Times are whole microseconds since the Unix epoch. The codec
+/// checks the reply's shape only (the members, their types and nulls, the
+/// state values, and a list of at most [`MAX_REVOKED_IDS_PER_REPLY`] IDs
+/// in strictly increasing byte order), not how the members agree with each
+/// other or with the request.
+///
+/// `Debug` prints `Status(..)`, none of the values.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Status {
+    /// The transport's time, read after it waited for any restore in
+    /// progress.
+    pub server_time: i64,
+    /// The recovery state's instance; `None` before the bootstrap.
+    pub instance_id: Option<String>,
+    pub recovery_key_epoch: Option<i64>,
+    pub recovery_state_revision: Option<i64>,
+    /// The current recovery public key (sent in lowercase hexadecimal).
+    pub recovery_public_key: Option<Vec<u8>>,
+    /// The challenge's state; `None` when no `operation_id` was asked.
+    pub operation_state: Option<OperationState>,
+    /// The challenge's expiry, when found.
+    pub expires_at: Option<i64>,
+    /// The expiry plus the transport's transaction timeout, when
+    /// [`OperationState::Expiring`].
+    pub settles_at: Option<i64>,
+    /// The restore's time, when [`OperationState::Restored`].
+    pub restored_at: Option<i64>,
+    /// The replacement the restore enrolled, when
+    /// [`OperationState::Restored`].
+    pub admin_id: Option<String>,
+    pub credential_id: Option<String>,
+    pub binding_id: Option<String>,
+    /// How many credentials the restore revoked, when
+    /// [`OperationState::Restored`].
+    pub revoked_credential_count: Option<i64>,
+    /// The next page of them after the request's `revoked_after`, in byte
+    /// order, when [`OperationState::Restored`].
+    pub revoked_credential_ids: Option<Vec<String>>,
+    /// The state of the credential with the asked key's public identity;
+    /// `None` when no `credential_spki` was asked.
+    pub enrolled_state: Option<EnrolledState>,
+    /// That credential's operator and ID, when found.
+    pub enrolled_admin_id: Option<String>,
+    pub enrolled_credential_id: Option<String>,
+    /// The SHA-256 of the UTF-8 bytes of that credential's trust anchor
+    /// reference, when found (sent in lowercase hexadecimal).
+    pub enrolled_trust_anchor_sha256: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for Status {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Status(..)")
     }
 }
 
@@ -618,6 +874,8 @@ pub enum Reply {
     Previewed(Previewed),
     /// The success of a `restore`.
     Restored(Restored),
+    /// The success of a `status` (boxed: by far the largest reply).
+    Status(Box<Status>),
 }
 
 impl fmt::Debug for Reply {
@@ -627,6 +885,7 @@ impl fmt::Debug for Reply {
             Self::Issued(_) => "Reply::Issued(..)",
             Self::Previewed(_) => "Reply::Previewed(..)",
             Self::Restored(_) => "Reply::Restored(..)",
+            Self::Status(_) => "Reply::Status(..)",
         })
     }
 }
@@ -639,6 +898,7 @@ impl Reply {
             Self::Issued(_) => Op::IssueChallenge,
             Self::Previewed(_) => Op::Preview,
             Self::Restored(_) => Op::Restore,
+            Self::Status(_) => Op::Status,
         }
     }
 }

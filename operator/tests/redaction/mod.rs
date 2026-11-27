@@ -6,7 +6,10 @@
 //! client and the binary writes a file or prints, that the signer's key and
 //! request have no way out, that the deployment-local client, once it
 //! exists, never names the signer, and that the binary signs and writes a
-//! file only where `sign` does, never overwriting one.
+//! file only where `sign` does, never overwriting one. And the wiping of
+//! the seed: compile-time checks that its holders are wiped on drop, the
+//! wipe observed on values still alive, and source checks of each wipe
+//! where nothing can be observed.
 
 use std::{
     collections::BTreeSet,
@@ -15,6 +18,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ed25519_dalek::SigningKey;
 use skyoauth_operator::{
     identity::IdentityError,
     recovery::{
@@ -22,6 +26,12 @@ use skyoauth_operator::{
         RestorationPlan, SignError, SignerError, SigningRequest, SoftwareSigner, VerifyError,
         challenge_message, check_challenge, parse_challenge, sign_challenge,
     },
+};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
+
+use crate::{
+    signature::TEST_KEY_FIXTURE,
+    support::{list, recovery_fixture, text, unhex},
 };
 
 /// 32 distinctive bytes: the signer's seed.
@@ -79,8 +89,9 @@ fn shown_error<E: std::error::Error>(error: &E) -> Vec<String> {
 /// values, contains none of them in any form.
 #[test]
 fn no_sentinel_value_is_shown() {
-    let signer = SoftwareSigner::from_seed(SEED).unwrap();
-    let new_key_signer = SoftwareSigner::from_seed(NEW_KEY_SEED).unwrap();
+    let (mut seed, mut new_key_seed) = (SEED, NEW_KEY_SEED);
+    let signer = SoftwareSigner::from_seed(&mut seed).unwrap();
+    let new_key_signer = SoftwareSigner::from_seed(&mut new_key_seed).unwrap();
     let new_key = new_key_signer.public_key();
     let plan = RestorationPlan {
         instance_id: INSTANCE.into(),
@@ -750,7 +761,7 @@ fn software_signer_source_has_no_way_out_for_the_seed() {
     // Every use of the signing key, each exactly once.
     let uses = [
         "pubstructSoftwareSigner{signing_key:SigningKey,",
-        "letsigning_key=SigningKey::from_bytes(&seed);",
+        "letsigning_key=SigningKey::from_bytes(seed);",
         "RecoveryPublicKey::from_bytes(signing_key.verifying_key().as_bytes())?;",
         "Ok(Self{signing_key,public_key,})",
         "self.signing_key.try_sign(request.message())",
@@ -823,7 +834,8 @@ fn software_signer_source_has_no_way_out_for_the_seed() {
         }
     }
     // A signer is usable as a trait object.
-    let signer = SoftwareSigner::from_seed(SEED).unwrap();
+    let mut seed = SEED;
+    let signer = SoftwareSigner::from_seed(&mut seed).unwrap();
     let object: &dyn RecoverySigner = &signer;
     assert_eq!(object.public_key(), signer.public_key());
 }
@@ -834,5 +846,241 @@ fn software_signer_source_has_no_way_out_for_the_seed() {
 fn signing_request_has_no_trait_to_copy_or_make_it() {
     for (name, has) in traits_of!(SigningRequest<'static>) {
         assert!(!has, "SigningRequest implements {name}");
+    }
+}
+
+/// Compiles only for a type that is wiped on drop.
+const fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+/// The types that hold the seed are wiped on drop, checked at compile time
+/// (this target does not build otherwise): `ed25519-dalek`'s `SigningKey`,
+/// which a `SoftwareSigner` holds, only with the crate's `zeroize` feature,
+/// and the `Zeroizing` arrays of the binary's seed file buffer (129 bytes)
+/// and seed (32 bytes). The library checks `SigningKey` and the binary its
+/// own types the same way at compile time, so neither builds otherwise;
+/// [`the_seed_is_wiped_in_the_source`] pins those checks.
+#[test]
+fn the_seed_holders_are_wiped_on_drop() {
+    const {
+        assert_zeroize_on_drop::<SigningKey>();
+        assert_zeroize_on_drop::<Zeroizing<[u8; SEED_FILE_BUFFER_BYTES]>>();
+        assert_zeroize_on_drop::<Zeroizing<[u8; 32]>>();
+    }
+}
+
+/// The size of the binary's seed file buffer: the 128-byte cap and one
+/// byte to detect a larger file.
+const SEED_FILE_BUFFER_BYTES: usize = 129;
+
+/// `SoftwareSigner::from_seed` wipes the caller's seed, in place, once its
+/// signing key is made, observed through the caller's array, still alive:
+/// for each test key, the signer has that key's public key (so the key was
+/// made before the wipe, not from the zero seed) and the array lent to it
+/// is all zeros after. (A freed memory cannot be read without `unsafe`, so
+/// the wipes on drop are held by the compile-time and source checks.)
+#[test]
+fn from_seed_wipes_the_seed_it_is_lent() {
+    let zero_key = SoftwareSigner::from_seed(&mut [0_u8; 32])
+        .unwrap()
+        .public_key();
+    let keys = recovery_fixture(TEST_KEY_FIXTURE);
+    for key in list(&keys, "keys") {
+        let name = text(key, "name");
+        let mut seed: [u8; 32] = unhex(text(key, "seed")).try_into().expect("32 bytes");
+        assert_ne!(seed, [0_u8; 32], "{name}");
+        let signer = SoftwareSigner::from_seed(&mut seed).unwrap();
+        assert_eq!(seed, [0_u8; 32], "{name}: the seed lent is not wiped");
+        assert_eq!(
+            signer.public_key().to_hex(),
+            text(key, "public_key"),
+            "{name}"
+        );
+        assert_ne!(signer.public_key(), zero_key, "{name}");
+    }
+}
+
+/// The text of the binary's source file `name`.
+fn bin_source(name: &str) -> String {
+    let path = source_dir().join(BIN_DIR).join(BINARY).join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+}
+
+/// The text of `code` (see [`joined_code`]) from the end of `header`,
+/// which must end with `{` and occur once, to its matching `}`, both
+/// excluded.
+fn body_of<'a>(code: &'a str, header: &str) -> &'a str {
+    assert!(header.ends_with('{'), "{header}");
+    assert_eq!(code.matches(header).count(), 1, "{header}");
+    let start = code.find(header).unwrap() + header.len();
+    let mut depth = 1_usize;
+    for (at, character) in code[start..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &code[start..start + at];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("no end of {header}");
+}
+
+/// Where nothing can be observed, the source holds each wipe of the seed:
+///
+/// - the manifest builds `ed25519-dalek` with `zeroize`, and `zeroize`
+///   without its default `alloc` and without `derive`;
+/// - `sign.rs` requires `SigningKey` to be wiped on drop at compile time,
+///   and `SoftwareSigner::from_seed` (its body pinned) borrows the seed and
+///   wipes it right after its signing key is made, before the public key
+///   is checked, so on every return;
+/// - the binary's seed file reader reads into a `Buffer`, a `Zeroizing`
+///   checked at compile time to be wiped on drop, and decodes the seed in
+///   place (its body pinned) into the caller's `Seed`, likewise checked;
+///   it declares no other array type, returns no array, and makes no copy
+///   of the bytes or the seed: no dereference of either, no `String`,
+///   `Vec`, `Box`, `to_vec`, `to_owned`, `into_owned`, `from_utf8`,
+///   `collect`, `copied`, `cloned`, `clone`, `Copy` or `mem::`;
+/// - `sign`'s block that holds the seed and the signer is pinned: the seed
+///   is a `Seed`, read in place and lent to `from_seed`, never dereferenced,
+///   dropped by hand or copied; the signer is borrowed from its `Result`,
+///   never moved out of it.
+#[test]
+fn the_seed_is_wiped_in_the_source() {
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    let manifest_lines: Vec<&str> = manifest.lines().collect();
+    for line in [
+        r#"ed25519-dalek = { version = "3.0.0", default-features = false, features = ["zeroize"] }"#,
+        r#"zeroize = { version = "1.9.2", default-features = false }"#,
+    ] {
+        assert!(manifest_lines.contains(&line), "the manifest lacks {line}");
+    }
+    assert_eq!(
+        manifest_lines
+            .iter()
+            .filter(|line| line.starts_with("zeroize") || line.starts_with("ed25519-dalek"))
+            .count(),
+        2,
+        "zeroize or ed25519-dalek is declared more than once"
+    );
+
+    let sign = joined_code(
+        &std::fs::read_to_string(source_dir().join("recovery").join("sign.rs")).unwrap(),
+    );
+    for token in [
+        "usezeroize::{Zeroizeas_,ZeroizeOnDrop};",
+        "constfnassert_wiped_on_drop<T:ZeroizeOnDrop>(){}",
+        "const_:()=assert_wiped_on_drop::<SigningKey>();",
+    ] {
+        assert!(sign.contains(token), "sign.rs lacks {token}");
+    }
+    assert_eq!(
+        body_of(
+            &sign,
+            "pubfnfrom_seed(seed:&mut[u8;32])->Result<Self,KeyError>{"
+        ),
+        "letsigning_key=SigningKey::from_bytes(seed);\
+         seed.zeroize();\
+         letpublic_key=RecoveryPublicKey::from_bytes(signing_key.verifying_key().as_bytes())?;\
+         Ok(Self{signing_key,public_key,})",
+        "from_seed changed"
+    );
+    assert_eq!(sign.matches("zeroize()").count(), 1);
+
+    let seed_file = joined_code(&bin_source(BIN_SEED_FILE));
+    for token in [
+        "usezeroize::{ZeroizeOnDrop,Zeroizing};",
+        "pubtypeSeed=Zeroizing<[u8;SEED_BYTES]>;",
+        "typeBuffer=Zeroizing<[u8;MAX_SEED_FILE_BYTES+1]>;",
+        "constfnassert_wiped_on_drop<T:ZeroizeOnDrop>(){}",
+        "const_:()={assert_wiped_on_drop::<Seed>();assert_wiped_on_drop::<Buffer>();};",
+        "letmutbuffer=Buffer::new([0_u8;MAX_SEED_FILE_BYTES+1]);",
+        "file.read(&mutbuffer[length..])",
+        "decode(&buffer[..length],seed)",
+    ] {
+        assert!(seed_file.contains(token), "{BIN_SEED_FILE} lacks {token}");
+    }
+    let read = body_of(
+        &seed_file,
+        "pubfnread(path:&Path,seed:&mutSeed)->Result<(),Failure>{",
+    );
+    // The seed is named twice: lent to `decode`, and in the refusal's
+    // fixed text ("not a seed").
+    assert_eq!(
+        (read.matches("seed").count(), read.matches(",seed)").count()),
+        (2, 1),
+        "read uses its seed other than to decode into it"
+    );
+    assert_eq!(
+        read.matches("buffer").count(),
+        4,
+        "read uses its buffer otherwise"
+    );
+    assert_eq!(
+        body_of(
+            &seed_file,
+            "fndecode(bytes:&[u8],seed:&mut[u8;SEED_BYTES])->Option<()>{"
+        ),
+        "letdigits=bytes.strip_suffix(b\"\\n\").unwrap_or(bytes);\
+         let(pairs,rest)=digits.as_chunks::<2>();\
+         ifpairs.len()!=SEED_BYTES||!rest.is_empty(){returnNone;}\
+         for(byte,[high,low])inseed.iter_mut().zip(pairs){\
+         *byte=(hex_digit(*high)?<<4)|hex_digit(*low)?;}\
+         Some(())",
+        "decode changed"
+    );
+    assert_eq!(
+        seed_file.matches("[0_u8;").count(),
+        1,
+        "{BIN_SEED_FILE} declares an array other than its buffer"
+    );
+    assert_eq!(
+        seed_file.matches("[u8;").count(),
+        3,
+        "{BIN_SEED_FILE} names an array type other than its seed's and its buffer's"
+    );
+    for token in [
+        "*seed",
+        "*buffer",
+        "->[u8",
+        "Option<[u8",
+        "String",
+        "Vec",
+        "Box",
+        "to_vec",
+        "to_owned",
+        "into_owned",
+        "from_utf8",
+        "collect",
+        "copied",
+        "cloned",
+        "clone",
+        "Copy",
+        "mem::",
+    ] {
+        assert!(!seed_file.contains(token), "{token} in {BIN_SEED_FILE}");
+    }
+
+    let cmd_sign = joined_code(&bin_source(BIN_SIGNING_FILE));
+    assert_eq!(
+        body_of(&cmd_sign, "letsigned={"),
+        "letmutseed=seed_file::Seed::default();\
+         seed_file::read(&flags.seed_file,&mutseed)?;\
+         letsigner=SoftwareSigner::from_seed(&mutseed);\
+         letsigner=match&signer{\
+         Ok(signer)=>signer,\
+         Err(err)=>{returnErr(Failure::Refused(format!(\
+         \"--seed-file:theseed'spublickeyisrefused({err:?}):{err}\"\
+         )));}};\
+         sign_challenge(&verified,signer)\
+         .map_err(|err|Failure::Refused(format!(\"refused({err:?}):{err}\")))?",
+        "{BIN_SIGNING_FILE}'s signing block changed"
+    );
+    assert_eq!(cmd_sign.matches("seed_file::Seed").count(), 1);
+    for token in ["*seed", "drop(", "[0_u8;", "[u8;", "clone", "Copy", "mem::"] {
+        assert!(!cmd_sign.contains(token), "{token} in {BIN_SIGNING_FILE}");
     }
 }

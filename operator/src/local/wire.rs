@@ -11,11 +11,20 @@
 //! no whitespace, only the escapes that writer uses and integers in their
 //! shortest form. Anything else is [`UnknownOutcome::Malformed`]: a reply
 //! the client cannot read exactly is never taken as a success or a refusal.
+//!
+//! A `status` request writes every member, `null` for an absent value; its
+//! reply has every member, each of them but `server_time` a value or
+//! `null`. A list of revoked credential IDs (a `restore`'s or a
+//! `status`'s) is read only when it holds at most
+//! [`MAX_REVOKED_IDS_PER_REPLY`] IDs in strictly increasing byte order:
+//! the parser checks the shape and the order within the one reply (lead
+//! ruling (e)), never the list against the count or another page.
 
 use super::{
-    BootstrapRequest, Bootstrapped, CallError, ErrorCode, IssueChallengeRequest, Issued,
-    MAX_REPLY_BYTES, MAX_REQUEST_BYTES, NotSent, Op, Previewed, Reply, Request, RequestLine,
-    ResponseRequest, Restored, UnknownOutcome,
+    BootstrapRequest, Bootstrapped, CallError, EnrolledState, ErrorCode, IssueChallengeRequest,
+    Issued, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, MAX_REVOKED_IDS_PER_REPLY, NotSent, Op,
+    OperationState, Previewed, Reply, Request, RequestLine, ResponseRequest, Restored, Status,
+    StatusRequest, UnknownOutcome,
 };
 use crate::text::{decode_hex, encode_hex};
 
@@ -79,6 +88,19 @@ impl Request {
                 push_member(&mut line, "operation_id", &request.operation_id);
                 push_member(&mut line, "signature", &encode_hex(&request.signature));
             }
+            Self::Status(request) => {
+                push_nullable(&mut line, "operation_id", request.operation_id.as_deref());
+                push_nullable(
+                    &mut line,
+                    "credential_spki",
+                    request
+                        .credential_spki
+                        .as_deref()
+                        .map(encode_hex)
+                        .as_deref(),
+                );
+                push_nullable(&mut line, "revoked_after", request.revoked_after.as_deref());
+            }
         }
         line.push_str("}\n");
         if line.len() > MAX_REQUEST_BYTES {
@@ -100,6 +122,7 @@ impl Request {
             Self::Bootstrap(request) => request.encoded_len_lower_bound(),
             Self::IssueChallenge(request) => request.encoded_len_lower_bound(),
             Self::Preview(request) | Self::Restore(request) => request.encoded_len_lower_bound(),
+            Self::Status(request) => request.encoded_len_lower_bound(),
         }
     }
 }
@@ -146,11 +169,38 @@ impl ResponseRequest {
     }
 }
 
+impl StatusRequest {
+    /// The lower bound of its request line's length (see
+    /// [`Request::encoded_len_lower_bound`]).
+    pub(super) fn encoded_len_lower_bound(&self) -> usize {
+        let text = |value: &Option<String>| value.as_ref().map_or(0, String::len);
+        text(&self.operation_id)
+            .saturating_add(
+                self.credential_spki
+                    .as_ref()
+                    .map_or(0, |spki| spki.len().saturating_mul(2)),
+            )
+            .saturating_add(text(&self.revoked_after))
+    }
+}
+
 /// Appends `,"name":` and `value` as a JSON string.
 fn push_member(out: &mut String, name: &str, value: &str) {
     out.push(',');
     push_name(out, name);
     push_string(out, value);
+}
+
+/// Appends `,"name":` and `value` as a JSON string, or `null` when absent.
+fn push_nullable(out: &mut String, name: &str, value: Option<&str>) {
+    match value {
+        Some(value) => push_member(out, name, value),
+        None => {
+            out.push(',');
+            push_name(out, name);
+            out.push_str("null");
+        }
+    }
 }
 
 /// Appends a member name and its colon.
@@ -254,13 +304,44 @@ pub fn parse_reply(op: Op, line: &[u8]) -> Result<Reply, CallError> {
             admin_id: reader.text("admin_id", true)?,
             credential_id: reader.text("credential_id", false)?,
             binding_id: reader.text("binding_id", false)?,
+            revoked_credential_count: reader.integer_member("revoked_credential_count")?,
             revoked_credential_ids: {
                 reader.member("revoked_credential_ids", false)?;
-                reader.strings()?
+                reader.revoked_ids()?
             },
             recovery_key_epoch: reader.integer_member("recovery_key_epoch")?,
             recovery_state_revision: reader.integer_member("recovery_state_revision")?,
         }),
+        Op::Status => Reply::Status(Box::new(Status {
+            server_time: {
+                reader.member("server_time", true)?;
+                reader.integer()?
+            },
+            instance_id: reader.nullable("instance_id", Reader::string)?,
+            recovery_key_epoch: reader.nullable("recovery_key_epoch", Reader::integer)?,
+            recovery_state_revision: reader.nullable("recovery_state_revision", Reader::integer)?,
+            recovery_public_key: reader.nullable("recovery_public_key", Reader::hex)?,
+            operation_state: reader.nullable("operation_state", |reader| {
+                reader.named(&OperationState::ALL, |state| state.as_str())
+            })?,
+            expires_at: reader.nullable("expires_at", Reader::integer)?,
+            settles_at: reader.nullable("settles_at", Reader::integer)?,
+            restored_at: reader.nullable("restored_at", Reader::integer)?,
+            admin_id: reader.nullable("admin_id", Reader::string)?,
+            credential_id: reader.nullable("credential_id", Reader::string)?,
+            binding_id: reader.nullable("binding_id", Reader::string)?,
+            revoked_credential_count: reader
+                .nullable("revoked_credential_count", Reader::integer)?,
+            revoked_credential_ids: reader
+                .nullable("revoked_credential_ids", Reader::revoked_ids)?,
+            enrolled_state: reader.nullable("enrolled_state", |reader| {
+                reader.named(&EnrolledState::ALL, |state| state.as_str())
+            })?,
+            enrolled_admin_id: reader.nullable("enrolled_admin_id", Reader::string)?,
+            enrolled_credential_id: reader.nullable("enrolled_credential_id", Reader::string)?,
+            enrolled_trust_anchor_sha256: reader
+                .nullable("enrolled_trust_anchor_sha256", Reader::hex)?,
+        })),
     };
     reader.close()?;
     Ok(reply)
@@ -424,18 +505,59 @@ impl Reader<'_> {
         digits.parse().map_err(|_| Malformed)
     }
 
-    /// An array of strings, maybe empty.
-    fn strings(&mut self) -> Result<Vec<String>, Malformed> {
+    /// The member `name`, never the first: `null`, or a value `read` reads.
+    fn nullable<T>(
+        &mut self,
+        name: &str,
+        read: impl FnOnce(&mut Self) -> Result<T, Malformed>,
+    ) -> Result<Option<T>, Malformed> {
+        self.member(name, false)?;
+        if self.token("null").is_ok() {
+            Ok(None)
+        } else {
+            read(self).map(Some)
+        }
+    }
+
+    /// A string of lowercase hexadecimal digits, decoded.
+    fn hex(&mut self) -> Result<Vec<u8>, Malformed> {
+        decode_hex(&self.string()?).ok_or(Malformed)
+    }
+
+    /// A string that is the wire value of one of `values`.
+    fn named<T: Copy>(
+        &mut self,
+        values: &[T],
+        name: fn(T) -> &'static str,
+    ) -> Result<T, Malformed> {
+        let read = self.string()?;
+        values
+            .iter()
+            .copied()
+            .find(|value| name(*value) == read)
+            .ok_or(Malformed)
+    }
+
+    /// A page of revoked credential IDs: an array of strings, maybe empty,
+    /// of at most [`MAX_REVOKED_IDS_PER_REPLY`], each greater than the one
+    /// before it in byte order (so none repeated). Checked as it is read:
+    /// the first ID past the limit or out of order ends the read.
+    fn revoked_ids(&mut self) -> Result<Vec<String>, Malformed> {
         self.token("[")?;
-        let mut strings = Vec::new();
+        let mut ids: Vec<String> = Vec::new();
         if self.token("]").is_ok() {
-            return Ok(strings);
+            return Ok(ids);
         }
         loop {
-            strings.push(self.string()?);
+            let id = self.string()?;
+            if ids.len() == MAX_REVOKED_IDS_PER_REPLY || ids.last().is_some_and(|last| *last >= id)
+            {
+                return Err(Malformed);
+            }
+            ids.push(id);
             match self.next() {
                 Some(b',') => {}
-                Some(b']') => return Ok(strings),
+                Some(b']') => return Ok(ids),
                 _ => return Err(Malformed),
             }
         }

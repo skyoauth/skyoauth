@@ -2,11 +2,12 @@
   "fixture_version": 1,
   "kind": "local_transport_wire",
   "status": "proposed",
-  "description": "The wire format of the service's deployment-local bootstrap and recovery transport (service/src/local_transport, module docs \"Protocol\", \"Operations\" and \"Errors\"): the request members of each op, the reply shapes, the closed set of refusal codes, the framing and the size limits, with golden request and reply lines. Inferred: no contract text fixes this wire format (the service's module docs say so); the service's code is the source, and status stays \"proposed\" until a contract states it. Framing: one request per connection; the client writes one JSON object on one line, the newline, then closes its write half (shutdown(SHUT_WR)); no byte may follow the newline; the server answers one JSON object on one line with its newline and closes. Requests: op first, then the op's members in the order listed under ops, no whitespace, byte values in lowercase hexadecimal, strings escaped as serde_json escapes them. Replies: serde_json's compact output, each success with exactly its members in the order listed under replies, every refusal {\"error\":\"<code>\"} and nothing else. framing.max_request_bytes is the service's MAX_REQUEST_BYTES; framing.max_reply_bytes is the client's own cap, 4 MiB (inferred: the service sets none, and a restore's revoked_credential_ids lists every credential it revoked, so its reply has no bound of its own); a reply over it is an unknown outcome (reconcile first). default_limits are the service's default time limits (Settings::default(): deadline, transaction_timeout and idle_timeout, in whole seconds) and the client's default total wait, their sum: the longest an accepted connection lasts on a default server, from the accept (the server's settings are tunable and not discoverable by the client); operator/tests/local_exchange and tests/harness/local_transport_wire.rs read them. The golden lines of exchange are the bytes the real service sent, with the given ID seed (SequentialIds) and clock, for a fresh database: the preview and restore signature is over the issued challenge M by the bootstrap recovery key (a test key). To regenerate exchange and the golden lines it names (the requests and replies of bootstrap, issue_challenge, preview and restore, and the not_restorable and conflict replies; every ID in them is a SequentialIds ID of exchange.id_seed): add for the time a test to tests/harness (wired in tests/pg.rs, run once with the database environment tests/pg.rs documents, then removed) that serves the service's LocalTransport::new(pool, a clock fixed at exchange.now_micros, SequentialIds::with_seed(exchange.id_seed), None), default Settings, on a fresh database (skyoauth-scenarios' TestDb, migrated), sends the requests of exchange.steps in order, each on its own connection framed as above, and prints each reply line verbatim. The requests are built from test keys: the bootstrap recovery key is the Ed25519 public key of the seed of 32 bytes 0x51 (SEED in service/tests/local_transport.rs), the new recovery key that of 32 bytes 0x52 (NEW_SEED); credential_spki is the Ed25519 SubjectPublicKeyInfo prefix 302a300506032b6570032100 followed by 32 bytes 0x01 (bootstrap) or 0x06 (issue_challenge), each a valid Ed25519 point (the service refuses a key that is not one); trust_anchor_ref is deployment/operator-ca and instance_id the bootstrap line's; the preview and restore signature is the 0x51 key's Ed25519 signature over the bytes of the challenge the issue_challenge reply carries. Ed25519 signatures are deterministic, so the same inputs give the same lines; a change to the ID format, to the order in which the transport draws IDs, to M or to a reply shape changes them, and tests/harness/local_transport_wire.rs (the_golden_exchange_is_the_services) fails until they are regenerated. issue_challenge_escapes and unknown_replies are written by hand, not captured. unknown_replies are bytes the operator's client must classify as an unknown outcome (reconcile first), with the reason it gives. Checked by operator/tests/local_wire (skyoauth-operator, every member) and tests/harness/local_transport_wire.rs (skyoauth-scenarios, against the service: constants, codes, golden requests through the real transport with an unreachable store, and the exchange on a database).",
+  "description": "The wire format of the service's deployment-local bootstrap and recovery transport (service/src/local_transport, module docs \"Protocol\", \"Operations\" and \"Errors\"): the request members of each op, the reply shapes, the closed set of refusal codes, the framing and the size limits, with golden request and reply lines. Inferred: no contract text fixes this wire format (the service's module docs say so); the service's code is the source, and status stays \"proposed\" until a contract states it. Framing: one request per connection; the client writes one JSON object on one line, the newline, then closes its write half (shutdown(SHUT_WR)); no byte may follow the newline; the server answers one JSON object on one line with its newline and closes. Requests: op first, then the op's members in the order listed under ops, no whitespace, byte values in lowercase hexadecimal, strings escaped as serde_json escapes them. Replies: serde_json's compact output, each success with exactly its members in the order listed under replies, every refusal {\"error\":\"<code>\"} and nothing else. framing.max_request_bytes is the service's MAX_REQUEST_BYTES; framing.max_reply_bytes is the client's own cap, 4 MiB, a defence against a misbehaving peer: the service bounds every reply, since a revoked_credential_ids list holds at most framing.max_revoked_ids_per_reply IDs (the service's page size; the restore reply lists the first of them in byte order, status the next page after revoked_after); a reply over it is an unknown outcome (reconcile first). A member type written <type>|null (status only) is a member that is always present, its value of that type or null. default_limits are the service's default time limits (Settings::default(): deadline, transaction_timeout and idle_timeout, in whole seconds) and the client's default total wait, their sum: the longest an accepted connection lasts on a default server, from the accept (the server's settings are tunable and not discoverable by the client); operator/tests/local_exchange and tests/harness/local_transport_wire.rs read them. The golden lines of exchange are the bytes the real service sent, with the given ID seed (SequentialIds) and clock, for a fresh database: the preview and restore signature is over the issued challenge M by the bootstrap recovery key (a test key). To regenerate exchange and the golden lines it names (the requests and replies of bootstrap, issue_challenge, preview, restore and status, and the not_restorable and conflict replies; every ID in them is a SequentialIds ID of exchange.id_seed): add for the time a test to tests/harness (wired in tests/pg.rs, run once with the database environment tests/pg.rs documents, then removed) that serves the service's LocalTransport::new(pool, a clock fixed at exchange.now_micros, SequentialIds::with_seed(exchange.id_seed), None), default Settings, on a fresh database (skyoauth-scenarios' TestDb, migrated), sends the requests of exchange.steps in order, each on its own connection framed as above, and prints each reply line verbatim. The requests are built from test keys: the bootstrap recovery key is the Ed25519 public key of the seed of 32 bytes 0x51 (SEED in service/tests/local_transport.rs), the new recovery key that of 32 bytes 0x52 (NEW_SEED); credential_spki is the Ed25519 SubjectPublicKeyInfo prefix 302a300506032b6570032100 followed by 32 bytes 0x01 (bootstrap) or 0x06 (issue_challenge), each a valid Ed25519 point (the service refuses a key that is not one); trust_anchor_ref is deployment/operator-ca and instance_id the bootstrap line's; the preview and restore signature is the 0x51 key's Ed25519 signature over the bytes of the challenge the issue_challenge reply carries. Ed25519 signatures are deterministic, so the same inputs give the same lines; a change to the ID format, to the order in which the transport draws IDs, to M or to a reply shape changes them, and tests/harness/local_transport_wire.rs (the_golden_exchange_is_the_services) fails until they are regenerated. The status requests ask nothing (before the bootstrap), the bootstrap's credential_spki (after it: the instance, recovery key and mTLS key enrolled; enrolled_trust_anchor_sha256 is the lowercase hexadecimal SHA-256 of the UTF-8 bytes of the trust_anchor_ref the bootstrap sent), and the issued operation ID (after the restore: restored, its replacement's IDs and the revoked count and page), then with revoked_after its last revoked ID (an empty page); status draws no ID. issue_challenge_escapes and unknown_replies are written by hand, not captured. unknown_replies are bytes the operator's client must classify as an unknown outcome (reconcile first), with the reason it gives. Checked by operator/tests/local_wire (skyoauth-operator, every member) and tests/harness/local_transport_wire.rs (skyoauth-scenarios, against the service: constants, codes, golden requests through the real transport with an unreachable store, and the exchange on a database). Edited in place on 2026-11-27 (lead ruling Q6, docs/proposals/local-read-operation.md; no deployed peer exists, so the version stays 1): the status op and its reply shape, the <type>|null notation, framing.max_revoked_ids_per_reply, the restored reply's revoked_credential_count and capped list, the status golden lines and exchange steps, and the unknown_replies of the parser's list checks (a list longer than the page size, unsorted or repeated, in a restored and in a status reply) and of the status shape (a missing member, a value where null belongs, an unknown state).",
   "framing": {
     "line_end": "\n",
     "max_request_bytes": 65536,
-    "max_reply_bytes": 4194304
+    "max_reply_bytes": 4194304,
+    "max_revoked_ids_per_reply": 1000
   },
   "default_limits": {
     "deadline_seconds": 30,
@@ -34,6 +35,11 @@
     "restore": [
       "operation_id",
       "signature"
+    ],
+    "status": [
+      "operation_id",
+      "credential_spki",
+      "revoked_after"
     ]
   },
   "replies": {
@@ -124,6 +130,10 @@
           "string"
         ],
         [
+          "revoked_credential_count",
+          "integer"
+        ],
+        [
           "revoked_credential_ids",
           "string_list"
         ],
@@ -134,6 +144,83 @@
         [
           "recovery_state_revision",
           "integer"
+        ]
+      ]
+    },
+    "status": {
+      "op": "status",
+      "members": [
+        [
+          "server_time",
+          "integer"
+        ],
+        [
+          "instance_id",
+          "string|null"
+        ],
+        [
+          "recovery_key_epoch",
+          "integer|null"
+        ],
+        [
+          "recovery_state_revision",
+          "integer|null"
+        ],
+        [
+          "recovery_public_key",
+          "hex|null"
+        ],
+        [
+          "operation_state",
+          "string|null"
+        ],
+        [
+          "expires_at",
+          "integer|null"
+        ],
+        [
+          "settles_at",
+          "integer|null"
+        ],
+        [
+          "restored_at",
+          "integer|null"
+        ],
+        [
+          "admin_id",
+          "string|null"
+        ],
+        [
+          "credential_id",
+          "string|null"
+        ],
+        [
+          "binding_id",
+          "string|null"
+        ],
+        [
+          "revoked_credential_count",
+          "integer|null"
+        ],
+        [
+          "revoked_credential_ids",
+          "string_list|null"
+        ],
+        [
+          "enrolled_state",
+          "string|null"
+        ],
+        [
+          "enrolled_admin_id",
+          "string|null"
+        ],
+        [
+          "enrolled_credential_id",
+          "string|null"
+        ],
+        [
+          "enrolled_trust_anchor_sha256",
+          "hex|null"
         ]
       ]
     },
@@ -236,6 +323,46 @@
         "signature": "a14dbaf5fda40acbc5a8c292e681cd41dc270dc39da5b152b4b9fed08bb95e267185dd263986c9c88dd99ad6c3e897be2d419ef19bf4f8f28b11a2a26f2e5807"
       },
       "line": "{\"op\":\"restore\",\"operation_id\":\"oper_0000000000000g000000000001\",\"signature\":\"a14dbaf5fda40acbc5a8c292e681cd41dc270dc39da5b152b4b9fed08bb95e267185dd263986c9c88dd99ad6c3e897be2d419ef19bf4f8f28b11a2a26f2e5807\"}\n"
+    },
+    {
+      "case": "status_empty",
+      "op": "status",
+      "values": {
+        "operation_id": null,
+        "credential_spki": null,
+        "revoked_after": null
+      },
+      "line": "{\"op\":\"status\",\"operation_id\":null,\"credential_spki\":null,\"revoked_after\":null}\n"
+    },
+    {
+      "case": "status_credential",
+      "op": "status",
+      "values": {
+        "operation_id": null,
+        "credential_spki": "302a300506032b65700321000101010101010101010101010101010101010101010101010101010101010101",
+        "revoked_after": null
+      },
+      "line": "{\"op\":\"status\",\"operation_id\":null,\"credential_spki\":\"302a300506032b65700321000101010101010101010101010101010101010101010101010101010101010101\",\"revoked_after\":null}\n"
+    },
+    {
+      "case": "status_operation",
+      "op": "status",
+      "values": {
+        "operation_id": "oper_0000000000000g000000000001",
+        "credential_spki": null,
+        "revoked_after": null
+      },
+      "line": "{\"op\":\"status\",\"operation_id\":\"oper_0000000000000g000000000001\",\"credential_spki\":null,\"revoked_after\":null}\n"
+    },
+    {
+      "case": "status_revoked_after",
+      "op": "status",
+      "values": {
+        "operation_id": "oper_0000000000000g000000000001",
+        "credential_spki": null,
+        "revoked_after": "cred_0000000000000g000000000001"
+      },
+      "line": "{\"op\":\"status\",\"operation_id\":\"oper_0000000000000g000000000001\",\"credential_spki\":null,\"revoked_after\":\"cred_0000000000000g000000000001\"}\n"
     }
   ],
   "golden_replies": [
@@ -281,13 +408,116 @@
         "admin_id": "adm_0000000000000g000000000002",
         "credential_id": "cred_0000000000000g000000000002",
         "binding_id": "role_0000000000000g000000000002",
+        "revoked_credential_count": 1,
         "revoked_credential_ids": [
           "cred_0000000000000g000000000001"
         ],
         "recovery_key_epoch": 2,
         "recovery_state_revision": 2
       },
-      "line": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+      "line": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+    },
+    {
+      "case": "status_nothing",
+      "reply": "status",
+      "values": {
+        "server_time": 1790000000000000,
+        "instance_id": null,
+        "recovery_key_epoch": null,
+        "recovery_state_revision": null,
+        "recovery_public_key": null,
+        "operation_state": null,
+        "expires_at": null,
+        "settles_at": null,
+        "restored_at": null,
+        "admin_id": null,
+        "credential_id": null,
+        "binding_id": null,
+        "revoked_credential_count": null,
+        "revoked_credential_ids": null,
+        "enrolled_state": null,
+        "enrolled_admin_id": null,
+        "enrolled_credential_id": null,
+        "enrolled_trust_anchor_sha256": null
+      },
+      "line": "{\"server_time\":1790000000000000,\"instance_id\":null,\"recovery_key_epoch\":null,\"recovery_state_revision\":null,\"recovery_public_key\":null,\"operation_state\":null,\"expires_at\":null,\"settles_at\":null,\"restored_at\":null,\"admin_id\":null,\"credential_id\":null,\"binding_id\":null,\"revoked_credential_count\":null,\"revoked_credential_ids\":null,\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+    },
+    {
+      "case": "status_bootstrapped",
+      "reply": "status",
+      "values": {
+        "server_time": 1790000000000000,
+        "instance_id": "019a9f3c-5b2e-7c41-9d8e-0000000c1001",
+        "recovery_key_epoch": 1,
+        "recovery_state_revision": 1,
+        "recovery_public_key": "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
+        "operation_state": null,
+        "expires_at": null,
+        "settles_at": null,
+        "restored_at": null,
+        "admin_id": null,
+        "credential_id": null,
+        "binding_id": null,
+        "revoked_credential_count": null,
+        "revoked_credential_ids": null,
+        "enrolled_state": "enabled",
+        "enrolled_admin_id": "adm_0000000000000g000000000001",
+        "enrolled_credential_id": "cred_0000000000000g000000000001",
+        "enrolled_trust_anchor_sha256": "5e642e0d248f2be0e9decc0a43d4f655ade8ea8a0a725030d2ca9f01d7276a4a"
+      },
+      "line": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":1,\"recovery_state_revision\":1,\"recovery_public_key\":\"c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a\",\"operation_state\":null,\"expires_at\":null,\"settles_at\":null,\"restored_at\":null,\"admin_id\":null,\"credential_id\":null,\"binding_id\":null,\"revoked_credential_count\":null,\"revoked_credential_ids\":null,\"enrolled_state\":\"enabled\",\"enrolled_admin_id\":\"adm_0000000000000g000000000001\",\"enrolled_credential_id\":\"cred_0000000000000g000000000001\",\"enrolled_trust_anchor_sha256\":\"5e642e0d248f2be0e9decc0a43d4f655ade8ea8a0a725030d2ca9f01d7276a4a\"}\n"
+    },
+    {
+      "case": "status_restored",
+      "reply": "status",
+      "values": {
+        "server_time": 1790000000000000,
+        "instance_id": "019a9f3c-5b2e-7c41-9d8e-0000000c1001",
+        "recovery_key_epoch": 2,
+        "recovery_state_revision": 2,
+        "recovery_public_key": "2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7",
+        "operation_state": "restored",
+        "expires_at": 1790000300000000,
+        "settles_at": null,
+        "restored_at": 1790000000000000,
+        "admin_id": "adm_0000000000000g000000000002",
+        "credential_id": "cred_0000000000000g000000000002",
+        "binding_id": "role_0000000000000g000000000002",
+        "revoked_credential_count": 1,
+        "revoked_credential_ids": [
+          "cred_0000000000000g000000000001"
+        ],
+        "enrolled_state": null,
+        "enrolled_admin_id": null,
+        "enrolled_credential_id": null,
+        "enrolled_trust_anchor_sha256": null
+      },
+      "line": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+    },
+    {
+      "case": "status_restored_after",
+      "reply": "status",
+      "values": {
+        "server_time": 1790000000000000,
+        "instance_id": "019a9f3c-5b2e-7c41-9d8e-0000000c1001",
+        "recovery_key_epoch": 2,
+        "recovery_state_revision": 2,
+        "recovery_public_key": "2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7",
+        "operation_state": "restored",
+        "expires_at": 1790000300000000,
+        "settles_at": null,
+        "restored_at": 1790000000000000,
+        "admin_id": "adm_0000000000000g000000000002",
+        "credential_id": "cred_0000000000000g000000000002",
+        "binding_id": "role_0000000000000g000000000002",
+        "revoked_credential_count": 1,
+        "revoked_credential_ids": [],
+        "enrolled_state": null,
+        "enrolled_admin_id": null,
+        "enrolled_credential_id": null,
+        "enrolled_trust_anchor_sha256": null
+      },
+      "line": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
     },
     {
       "case": "error_forbidden",
@@ -344,8 +574,16 @@
     "challenge_ttl_seconds": 300,
     "steps": [
       {
+        "request": "status_empty",
+        "reply": "status_nothing"
+      },
+      {
         "request": "bootstrap",
         "reply": "bootstrapped"
+      },
+      {
+        "request": "status_credential",
+        "reply": "status_bootstrapped"
       },
       {
         "request": "issue_challenge",
@@ -358,6 +596,14 @@
       {
         "request": "restore",
         "reply": "restored"
+      },
+      {
+        "request": "status_operation",
+        "reply": "status_restored"
+      },
+      {
+        "request": "status_revoked_after",
+        "reply": "status_restored_after"
       },
       {
         "request": "restore",
@@ -385,7 +631,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}"
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}"
         }
       ],
       "expected": "truncated"
@@ -415,7 +661,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "trailing_bytes"
@@ -425,7 +671,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"error\":\"conflict\"}\n{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"error\":\"conflict\"}\n{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "trailing_bytes"
@@ -528,7 +774,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\r\n"
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\r\n"
         }
       ],
       "expected": "malformed"
@@ -728,7 +974,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":02,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":02,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -738,7 +984,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":-0}\n"
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":-0}\n"
         }
       ],
       "expected": "malformed"
@@ -788,7 +1034,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":\"cred_0000000000000g000000000001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":\"cred_0000000000000g000000000001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -798,7 +1044,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[1],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[1],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -808,7 +1054,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\",],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\",],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -868,7 +1114,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm\\/0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"adm\\/0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -878,7 +1124,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"\\u0061dm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"\\u0061dm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -888,7 +1134,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm\\u001F0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"adm\\u001F0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -898,7 +1144,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm\\u000a0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"adm\\u000a0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -908,7 +1154,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm\t0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"adm\t0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -918,7 +1164,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"\\u0061dmin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"\\u0061dmin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -938,7 +1184,7 @@
       "op": "preview",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
         }
       ],
       "expected": "malformed"
@@ -988,7 +1234,7 @@
       "op": "restore",
       "parts": [
         {
-          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"error\":\"conflict\"}\n"
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"error\":\"conflict\"}\n"
         }
       ],
       "expected": "malformed"
@@ -1072,6 +1318,206 @@
         }
       ],
       "expected": "unknown_code"
+    },
+    {
+      "case": "restored_without_count",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "restored_count_as_null",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":null,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "restored_ids_over_the_page",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1001,\"revoked_credential_ids\":[\"cred_0000\",\"cred_0001\",\"cred_0002\",\"cred_0003\",\"cred_0004\",\"cred_0005\",\"cred_0006\",\"cred_0007\",\"cred_0008\",\"cred_0009\",\"cred_0010\",\"cred_0011\",\"cred_0012\",\"cred_0013\",\"cred_0014\",\"cred_0015\",\"cred_0016\",\"cred_0017\",\"cred_0018\",\"cred_0019\",\"cred_0020\",\"cred_0021\",\"cred_0022\",\"cred_0023\",\"cred_0024\",\"cred_0025\",\"cred_0026\",\"cred_0027\",\"cred_0028\",\"cred_0029\",\"cred_0030\",\"cred_0031\",\"cred_0032\",\"cred_0033\",\"cred_0034\",\"cred_0035\",\"cred_0036\",\"cred_0037\",\"cred_0038\",\"cred_0039\",\"cred_0040\",\"cred_0041\",\"cred_0042\",\"cred_0043\",\"cred_0044\",\"cred_0045\",\"cred_0046\",\"cred_0047\",\"cred_0048\",\"cred_0049\",\"cred_0050\",\"cred_0051\",\"cred_0052\",\"cred_0053\",\"cred_0054\",\"cred_0055\",\"cred_0056\",\"cred_0057\",\"cred_0058\",\"cred_0059\",\"cred_0060\",\"cred_0061\",\"cred_0062\",\"cred_0063\",\"cred_0064\",\"cred_0065\",\"cred_0066\",\"cred_0067\",\"cred_0068\",\"cred_0069\",\"cred_0070\",\"cred_0071\",\"cred_0072\",\"cred_0073\",\"cred_0074\",\"cred_0075\",\"cred_0076\",\"cred_0077\",\"cred_0078\",\"cred_0079\",\"cred_0080\",\"cred_0081\",\"cred_0082\",\"cred_0083\",\"cred_0084\",\"cred_0085\",\"cred_0086\",\"cred_0087\",\"cred_0088\",\"cred_0089\",\"cred_0090\",\"cred_0091\",\"cred_0092\",\"cred_0093\",\"cred_0094\",\"cred_0095\",\"cred_0096\",\"cred_0097\",\"cred_0098\",\"cred_0099\",\"cred_0100\",\"cred_0101\",\"cred_0102\",\"cred_0103\",\"cred_0104\",\"cred_0105\",\"cred_0106\",\"cred_0107\",\"cred_0108\",\"cred_0109\",\"cred_0110\",\"cred_0111\",\"cred_0112\",\"cred_0113\",\"cred_0114\",\"cred_0115\",\"cred_0116\",\"cred_0117\",\"cred_0118\",\"cred_0119\",\"cred_0120\",\"cred_0121\",\"cred_0122\",\"cred_0123\",\"cred_0124\",\"cred_0125\",\"cred_0126\",\"cred_0127\",\"cred_0128\",\"cred_0129\",\"cred_0130\",\"cred_0131\",\"cred_0132\",\"cred_0133\",\"cred_0134\",\"cred_0135\",\"cred_0136\",\"cred_0137\",\"cred_0138\",\"cred_0139\",\"cred_0140\",\"cred_0141\",\"cred_0142\",\"cred_0143\",\"cred_0144\",\"cred_0145\",\"cred_0146\",\"cred_0147\",\"cred_0148\",\"cred_0149\",\"cred_0150\",\"cred_0151\",\"cred_0152\",\"cred_0153\",\"cred_0154\",\"cred_0155\",\"cred_0156\",\"cred_0157\",\"cred_0158\",\"cred_0159\",\"cred_0160\",\"cred_0161\",\"cred_0162\",\"cred_0163\",\"cred_0164\",\"cred_0165\",\"cred_0166\",\"cred_0167\",\"cred_0168\",\"cred_0169\",\"cred_0170\",\"cred_0171\",\"cred_0172\",\"cred_0173\",\"cred_0174\",\"cred_0175\",\"cred_0176\",\"cred_0177\",\"cred_0178\",\"cred_0179\",\"cred_0180\",\"cred_0181\",\"cred_0182\",\"cred_0183\",\"cred_0184\",\"cred_0185\",\"cred_0186\",\"cred_0187\",\"cred_0188\",\"cred_0189\",\"cred_0190\",\"cred_0191\",\"cred_0192\",\"cred_0193\",\"cred_0194\",\"cred_0195\",\"cred_0196\",\"cred_0197\",\"cred_0198\",\"cred_0199\",\"cred_0200\",\"cred_0201\",\"cred_0202\",\"cred_0203\",\"cred_0204\",\"cred_0205\",\"cred_0206\",\"cred_0207\",\"cred_0208\",\"cred_0209\",\"cred_0210\",\"cred_0211\",\"cred_0212\",\"cred_0213\",\"cred_0214\",\"cred_0215\",\"cred_0216\",\"cred_0217\",\"cred_0218\",\"cred_0219\",\"cred_0220\",\"cred_0221\",\"cred_0222\",\"cred_0223\",\"cred_0224\",\"cred_0225\",\"cred_0226\",\"cred_0227\",\"cred_0228\",\"cred_0229\",\"cred_0230\",\"cred_0231\",\"cred_0232\",\"cred_0233\",\"cred_0234\",\"cred_0235\",\"cred_0236\",\"cred_0237\",\"cred_0238\",\"cred_0239\",\"cred_0240\",\"cred_0241\",\"cred_0242\",\"cred_0243\",\"cred_0244\",\"cred_0245\",\"cred_0246\",\"cred_0247\",\"cred_0248\",\"cred_0249\",\"cred_0250\",\"cred_0251\",\"cred_0252\",\"cred_0253\",\"cred_0254\",\"cred_0255\",\"cred_0256\",\"cred_0257\",\"cred_0258\",\"cred_0259\",\"cred_0260\",\"cred_0261\",\"cred_0262\",\"cred_0263\",\"cred_0264\",\"cred_0265\",\"cred_0266\",\"cred_0267\",\"cred_0268\",\"cred_0269\",\"cred_0270\",\"cred_0271\",\"cred_0272\",\"cred_0273\",\"cred_0274\",\"cred_0275\",\"cred_0276\",\"cred_0277\",\"cred_0278\",\"cred_0279\",\"cred_0280\",\"cred_0281\",\"cred_0282\",\"cred_0283\",\"cred_0284\",\"cred_0285\",\"cred_0286\",\"cred_0287\",\"cred_0288\",\"cred_0289\",\"cred_0290\",\"cred_0291\",\"cred_0292\",\"cred_0293\",\"cred_0294\",\"cred_0295\",\"cred_0296\",\"cred_0297\",\"cred_0298\",\"cred_0299\",\"cred_0300\",\"cred_0301\",\"cred_0302\",\"cred_0303\",\"cred_0304\",\"cred_0305\",\"cred_0306\",\"cred_0307\",\"cred_0308\",\"cred_0309\",\"cred_0310\",\"cred_0311\",\"cred_0312\",\"cred_0313\",\"cred_0314\",\"cred_0315\",\"cred_0316\",\"cred_0317\",\"cred_0318\",\"cred_0319\",\"cred_0320\",\"cred_0321\",\"cred_0322\",\"cred_0323\",\"cred_0324\",\"cred_0325\",\"cred_0326\",\"cred_0327\",\"cred_0328\",\"cred_0329\",\"cred_0330\",\"cred_0331\",\"cred_0332\",\"cred_0333\",\"cred_0334\",\"cred_0335\",\"cred_0336\",\"cred_0337\",\"cred_0338\",\"cred_0339\",\"cred_0340\",\"cred_0341\",\"cred_0342\",\"cred_0343\",\"cred_0344\",\"cred_0345\",\"cred_0346\",\"cred_0347\",\"cred_0348\",\"cred_0349\",\"cred_0350\",\"cred_0351\",\"cred_0352\",\"cred_0353\",\"cred_0354\",\"cred_0355\",\"cred_0356\",\"cred_0357\",\"cred_0358\",\"cred_0359\",\"cred_0360\",\"cred_0361\",\"cred_0362\",\"cred_0363\",\"cred_0364\",\"cred_0365\",\"cred_0366\",\"cred_0367\",\"cred_0368\",\"cred_0369\",\"cred_0370\",\"cred_0371\",\"cred_0372\",\"cred_0373\",\"cred_0374\",\"cred_0375\",\"cred_0376\",\"cred_0377\",\"cred_0378\",\"cred_0379\",\"cred_0380\",\"cred_0381\",\"cred_0382\",\"cred_0383\",\"cred_0384\",\"cred_0385\",\"cred_0386\",\"cred_0387\",\"cred_0388\",\"cred_0389\",\"cred_0390\",\"cred_0391\",\"cred_0392\",\"cred_0393\",\"cred_0394\",\"cred_0395\",\"cred_0396\",\"cred_0397\",\"cred_0398\",\"cred_0399\",\"cred_0400\",\"cred_0401\",\"cred_0402\",\"cred_0403\",\"cred_0404\",\"cred_0405\",\"cred_0406\",\"cred_0407\",\"cred_0408\",\"cred_0409\",\"cred_0410\",\"cred_0411\",\"cred_0412\",\"cred_0413\",\"cred_0414\",\"cred_0415\",\"cred_0416\",\"cred_0417\",\"cred_0418\",\"cred_0419\",\"cred_0420\",\"cred_0421\",\"cred_0422\",\"cred_0423\",\"cred_0424\",\"cred_0425\",\"cred_0426\",\"cred_0427\",\"cred_0428\",\"cred_0429\",\"cred_0430\",\"cred_0431\",\"cred_0432\",\"cred_0433\",\"cred_0434\",\"cred_0435\",\"cred_0436\",\"cred_0437\",\"cred_0438\",\"cred_0439\",\"cred_0440\",\"cred_0441\",\"cred_0442\",\"cred_0443\",\"cred_0444\",\"cred_0445\",\"cred_0446\",\"cred_0447\",\"cred_0448\",\"cred_0449\",\"cred_0450\",\"cred_0451\",\"cred_0452\",\"cred_0453\",\"cred_0454\",\"cred_0455\",\"cred_0456\",\"cred_0457\",\"cred_0458\",\"cred_0459\",\"cred_0460\",\"cred_0461\",\"cred_0462\",\"cred_0463\",\"cred_0464\",\"cred_0465\",\"cred_0466\",\"cred_0467\",\"cred_0468\",\"cred_0469\",\"cred_0470\",\"cred_0471\",\"cred_0472\",\"cred_0473\",\"cred_0474\",\"cred_0475\",\"cred_0476\",\"cred_0477\",\"cred_0478\",\"cred_0479\",\"cred_0480\",\"cred_0481\",\"cred_0482\",\"cred_0483\",\"cred_0484\",\"cred_0485\",\"cred_0486\",\"cred_0487\",\"cred_0488\",\"cred_0489\",\"cred_0490\",\"cred_0491\",\"cred_0492\",\"cred_0493\",\"cred_0494\",\"cred_0495\",\"cred_0496\",\"cred_0497\",\"cred_0498\",\"cred_0499\",\"cred_0500\",\"cred_0501\",\"cred_0502\",\"cred_0503\",\"cred_0504\",\"cred_0505\",\"cred_0506\",\"cred_0507\",\"cred_0508\",\"cred_0509\",\"cred_0510\",\"cred_0511\",\"cred_0512\",\"cred_0513\",\"cred_0514\",\"cred_0515\",\"cred_0516\",\"cred_0517\",\"cred_0518\",\"cred_0519\",\"cred_0520\",\"cred_0521\",\"cred_0522\",\"cred_0523\",\"cred_0524\",\"cred_0525\",\"cred_0526\",\"cred_0527\",\"cred_0528\",\"cred_0529\",\"cred_0530\",\"cred_0531\",\"cred_0532\",\"cred_0533\",\"cred_0534\",\"cred_0535\",\"cred_0536\",\"cred_0537\",\"cred_0538\",\"cred_0539\",\"cred_0540\",\"cred_0541\",\"cred_0542\",\"cred_0543\",\"cred_0544\",\"cred_0545\",\"cred_0546\",\"cred_0547\",\"cred_0548\",\"cred_0549\",\"cred_0550\",\"cred_0551\",\"cred_0552\",\"cred_0553\",\"cred_0554\",\"cred_0555\",\"cred_0556\",\"cred_0557\",\"cred_0558\",\"cred_0559\",\"cred_0560\",\"cred_0561\",\"cred_0562\",\"cred_0563\",\"cred_0564\",\"cred_0565\",\"cred_0566\",\"cred_0567\",\"cred_0568\",\"cred_0569\",\"cred_0570\",\"cred_0571\",\"cred_0572\",\"cred_0573\",\"cred_0574\",\"cred_0575\",\"cred_0576\",\"cred_0577\",\"cred_0578\",\"cred_0579\",\"cred_0580\",\"cred_0581\",\"cred_0582\",\"cred_0583\",\"cred_0584\",\"cred_0585\",\"cred_0586\",\"cred_0587\",\"cred_0588\",\"cred_0589\",\"cred_0590\",\"cred_0591\",\"cred_0592\",\"cred_0593\",\"cred_0594\",\"cred_0595\",\"cred_0596\",\"cred_0597\",\"cred_0598\",\"cred_0599\",\"cred_0600\",\"cred_0601\",\"cred_0602\",\"cred_0603\",\"cred_0604\",\"cred_0605\",\"cred_0606\",\"cred_0607\",\"cred_0608\",\"cred_0609\",\"cred_0610\",\"cred_0611\",\"cred_0612\",\"cred_0613\",\"cred_0614\",\"cred_0615\",\"cred_0616\",\"cred_0617\",\"cred_0618\",\"cred_0619\",\"cred_0620\",\"cred_0621\",\"cred_0622\",\"cred_0623\",\"cred_0624\",\"cred_0625\",\"cred_0626\",\"cred_0627\",\"cred_0628\",\"cred_0629\",\"cred_0630\",\"cred_0631\",\"cred_0632\",\"cred_0633\",\"cred_0634\",\"cred_0635\",\"cred_0636\",\"cred_0637\",\"cred_0638\",\"cred_0639\",\"cred_0640\",\"cred_0641\",\"cred_0642\",\"cred_0643\",\"cred_0644\",\"cred_0645\",\"cred_0646\",\"cred_0647\",\"cred_0648\",\"cred_0649\",\"cred_0650\",\"cred_0651\",\"cred_0652\",\"cred_0653\",\"cred_0654\",\"cred_0655\",\"cred_0656\",\"cred_0657\",\"cred_0658\",\"cred_0659\",\"cred_0660\",\"cred_0661\",\"cred_0662\",\"cred_0663\",\"cred_0664\",\"cred_0665\",\"cred_0666\",\"cred_0667\",\"cred_0668\",\"cred_0669\",\"cred_0670\",\"cred_0671\",\"cred_0672\",\"cred_0673\",\"cred_0674\",\"cred_0675\",\"cred_0676\",\"cred_0677\",\"cred_0678\",\"cred_0679\",\"cred_0680\",\"cred_0681\",\"cred_0682\",\"cred_0683\",\"cred_0684\",\"cred_0685\",\"cred_0686\",\"cred_0687\",\"cred_0688\",\"cred_0689\",\"cred_0690\",\"cred_0691\",\"cred_0692\",\"cred_0693\",\"cred_0694\",\"cred_0695\",\"cred_0696\",\"cred_0697\",\"cred_0698\",\"cred_0699\",\"cred_0700\",\"cred_0701\",\"cred_0702\",\"cred_0703\",\"cred_0704\",\"cred_0705\",\"cred_0706\",\"cred_0707\",\"cred_0708\",\"cred_0709\",\"cred_0710\",\"cred_0711\",\"cred_0712\",\"cred_0713\",\"cred_0714\",\"cred_0715\",\"cred_0716\",\"cred_0717\",\"cred_0718\",\"cred_0719\",\"cred_0720\",\"cred_0721\",\"cred_0722\",\"cred_0723\",\"cred_0724\",\"cred_0725\",\"cred_0726\",\"cred_0727\",\"cred_0728\",\"cred_0729\",\"cred_0730\",\"cred_0731\",\"cred_0732\",\"cred_0733\",\"cred_0734\",\"cred_0735\",\"cred_0736\",\"cred_0737\",\"cred_0738\",\"cred_0739\",\"cred_0740\",\"cred_0741\",\"cred_0742\",\"cred_0743\",\"cred_0744\",\"cred_0745\",\"cred_0746\",\"cred_0747\",\"cred_0748\",\"cred_0749\",\"cred_0750\",\"cred_0751\",\"cred_0752\",\"cred_0753\",\"cred_0754\",\"cred_0755\",\"cred_0756\",\"cred_0757\",\"cred_0758\",\"cred_0759\",\"cred_0760\",\"cred_0761\",\"cred_0762\",\"cred_0763\",\"cred_0764\",\"cred_0765\",\"cred_0766\",\"cred_0767\",\"cred_0768\",\"cred_0769\",\"cred_0770\",\"cred_0771\",\"cred_0772\",\"cred_0773\",\"cred_0774\",\"cred_0775\",\"cred_0776\",\"cred_0777\",\"cred_0778\",\"cred_0779\",\"cred_0780\",\"cred_0781\",\"cred_0782\",\"cred_0783\",\"cred_0784\",\"cred_0785\",\"cred_0786\",\"cred_0787\",\"cred_0788\",\"cred_0789\",\"cred_0790\",\"cred_0791\",\"cred_0792\",\"cred_0793\",\"cred_0794\",\"cred_0795\",\"cred_0796\",\"cred_0797\",\"cred_0798\",\"cred_0799\",\"cred_0800\",\"cred_0801\",\"cred_0802\",\"cred_0803\",\"cred_0804\",\"cred_0805\",\"cred_0806\",\"cred_0807\",\"cred_0808\",\"cred_0809\",\"cred_0810\",\"cred_0811\",\"cred_0812\",\"cred_0813\",\"cred_0814\",\"cred_0815\",\"cred_0816\",\"cred_0817\",\"cred_0818\",\"cred_0819\",\"cred_0820\",\"cred_0821\",\"cred_0822\",\"cred_0823\",\"cred_0824\",\"cred_0825\",\"cred_0826\",\"cred_0827\",\"cred_0828\",\"cred_0829\",\"cred_0830\",\"cred_0831\",\"cred_0832\",\"cred_0833\",\"cred_0834\",\"cred_0835\",\"cred_0836\",\"cred_0837\",\"cred_0838\",\"cred_0839\",\"cred_0840\",\"cred_0841\",\"cred_0842\",\"cred_0843\",\"cred_0844\",\"cred_0845\",\"cred_0846\",\"cred_0847\",\"cred_0848\",\"cred_0849\",\"cred_0850\",\"cred_0851\",\"cred_0852\",\"cred_0853\",\"cred_0854\",\"cred_0855\",\"cred_0856\",\"cred_0857\",\"cred_0858\",\"cred_0859\",\"cred_0860\",\"cred_0861\",\"cred_0862\",\"cred_0863\",\"cred_0864\",\"cred_0865\",\"cred_0866\",\"cred_0867\",\"cred_0868\",\"cred_0869\",\"cred_0870\",\"cred_0871\",\"cred_0872\",\"cred_0873\",\"cred_0874\",\"cred_0875\",\"cred_0876\",\"cred_0877\",\"cred_0878\",\"cred_0879\",\"cred_0880\",\"cred_0881\",\"cred_0882\",\"cred_0883\",\"cred_0884\",\"cred_0885\",\"cred_0886\",\"cred_0887\",\"cred_0888\",\"cred_0889\",\"cred_0890\",\"cred_0891\",\"cred_0892\",\"cred_0893\",\"cred_0894\",\"cred_0895\",\"cred_0896\",\"cred_0897\",\"cred_0898\",\"cred_0899\",\"cred_0900\",\"cred_0901\",\"cred_0902\",\"cred_0903\",\"cred_0904\",\"cred_0905\",\"cred_0906\",\"cred_0907\",\"cred_0908\",\"cred_0909\",\"cred_0910\",\"cred_0911\",\"cred_0912\",\"cred_0913\",\"cred_0914\",\"cred_0915\",\"cred_0916\",\"cred_0917\",\"cred_0918\",\"cred_0919\",\"cred_0920\",\"cred_0921\",\"cred_0922\",\"cred_0923\",\"cred_0924\",\"cred_0925\",\"cred_0926\",\"cred_0927\",\"cred_0928\",\"cred_0929\",\"cred_0930\",\"cred_0931\",\"cred_0932\",\"cred_0933\",\"cred_0934\",\"cred_0935\",\"cred_0936\",\"cred_0937\",\"cred_0938\",\"cred_0939\",\"cred_0940\",\"cred_0941\",\"cred_0942\",\"cred_0943\",\"cred_0944\",\"cred_0945\",\"cred_0946\",\"cred_0947\",\"cred_0948\",\"cred_0949\",\"cred_0950\",\"cred_0951\",\"cred_0952\",\"cred_0953\",\"cred_0954\",\"cred_0955\",\"cred_0956\",\"cred_0957\",\"cred_0958\",\"cred_0959\",\"cred_0960\",\"cred_0961\",\"cred_0962\",\"cred_0963\",\"cred_0964\",\"cred_0965\",\"cred_0966\",\"cred_0967\",\"cred_0968\",\"cred_0969\",\"cred_0970\",\"cred_0971\",\"cred_0972\",\"cred_0973\",\"cred_0974\",\"cred_0975\",\"cred_0976\",\"cred_0977\",\"cred_0978\",\"cred_0979\",\"cred_0980\",\"cred_0981\",\"cred_0982\",\"cred_0983\",\"cred_0984\",\"cred_0985\",\"cred_0986\",\"cred_0987\",\"cred_0988\",\"cred_0989\",\"cred_0990\",\"cred_0991\",\"cred_0992\",\"cred_0993\",\"cred_0994\",\"cred_0995\",\"cred_0996\",\"cred_0997\",\"cred_0998\",\"cred_0999\",\"cred_1000\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "restored_ids_unsorted",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":2,\"revoked_credential_ids\":[\"cred_0000000000000g000000000002\",\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "restored_ids_repeated",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":2,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\",\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "restored_ids_as_null",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":null,\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_missing_member",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_null_member_left_out_last",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_null_as_string",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":\"null\",\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_server_time_as_null",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":null,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_unknown_operation_state",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"pending\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_unknown_enrolled_state",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":1,\"recovery_state_revision\":1,\"recovery_public_key\":\"c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a\",\"operation_state\":null,\"expires_at\":null,\"settles_at\":null,\"restored_at\":null,\"admin_id\":null,\"credential_id\":null,\"binding_id\":null,\"revoked_credential_count\":null,\"revoked_credential_ids\":null,\"enrolled_state\":\"active\",\"enrolled_admin_id\":\"adm_0000000000000g000000000001\",\"enrolled_credential_id\":\"cred_0000000000000g000000000001\",\"enrolled_trust_anchor_sha256\":\"5e642e0d248f2be0e9decc0a43d4f655ade8ea8a0a725030d2ca9f01d7276a4a\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_list_holding_null",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":1,\"recovery_state_revision\":1,\"recovery_public_key\":\"c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a\",\"operation_state\":null,\"expires_at\":null,\"settles_at\":null,\"restored_at\":null,\"admin_id\":null,\"credential_id\":null,\"binding_id\":null,\"revoked_credential_count\":null,\"revoked_credential_ids\":[null],\"enrolled_state\":\"enabled\",\"enrolled_admin_id\":\"adm_0000000000000g000000000001\",\"enrolled_credential_id\":\"cred_0000000000000g000000000001\",\"enrolled_trust_anchor_sha256\":\"5e642e0d248f2be0e9decc0a43d4f655ade8ea8a0a725030d2ca9f01d7276a4a\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_ids_over_the_page",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1001,\"revoked_credential_ids\":[\"cred_0000\",\"cred_0001\",\"cred_0002\",\"cred_0003\",\"cred_0004\",\"cred_0005\",\"cred_0006\",\"cred_0007\",\"cred_0008\",\"cred_0009\",\"cred_0010\",\"cred_0011\",\"cred_0012\",\"cred_0013\",\"cred_0014\",\"cred_0015\",\"cred_0016\",\"cred_0017\",\"cred_0018\",\"cred_0019\",\"cred_0020\",\"cred_0021\",\"cred_0022\",\"cred_0023\",\"cred_0024\",\"cred_0025\",\"cred_0026\",\"cred_0027\",\"cred_0028\",\"cred_0029\",\"cred_0030\",\"cred_0031\",\"cred_0032\",\"cred_0033\",\"cred_0034\",\"cred_0035\",\"cred_0036\",\"cred_0037\",\"cred_0038\",\"cred_0039\",\"cred_0040\",\"cred_0041\",\"cred_0042\",\"cred_0043\",\"cred_0044\",\"cred_0045\",\"cred_0046\",\"cred_0047\",\"cred_0048\",\"cred_0049\",\"cred_0050\",\"cred_0051\",\"cred_0052\",\"cred_0053\",\"cred_0054\",\"cred_0055\",\"cred_0056\",\"cred_0057\",\"cred_0058\",\"cred_0059\",\"cred_0060\",\"cred_0061\",\"cred_0062\",\"cred_0063\",\"cred_0064\",\"cred_0065\",\"cred_0066\",\"cred_0067\",\"cred_0068\",\"cred_0069\",\"cred_0070\",\"cred_0071\",\"cred_0072\",\"cred_0073\",\"cred_0074\",\"cred_0075\",\"cred_0076\",\"cred_0077\",\"cred_0078\",\"cred_0079\",\"cred_0080\",\"cred_0081\",\"cred_0082\",\"cred_0083\",\"cred_0084\",\"cred_0085\",\"cred_0086\",\"cred_0087\",\"cred_0088\",\"cred_0089\",\"cred_0090\",\"cred_0091\",\"cred_0092\",\"cred_0093\",\"cred_0094\",\"cred_0095\",\"cred_0096\",\"cred_0097\",\"cred_0098\",\"cred_0099\",\"cred_0100\",\"cred_0101\",\"cred_0102\",\"cred_0103\",\"cred_0104\",\"cred_0105\",\"cred_0106\",\"cred_0107\",\"cred_0108\",\"cred_0109\",\"cred_0110\",\"cred_0111\",\"cred_0112\",\"cred_0113\",\"cred_0114\",\"cred_0115\",\"cred_0116\",\"cred_0117\",\"cred_0118\",\"cred_0119\",\"cred_0120\",\"cred_0121\",\"cred_0122\",\"cred_0123\",\"cred_0124\",\"cred_0125\",\"cred_0126\",\"cred_0127\",\"cred_0128\",\"cred_0129\",\"cred_0130\",\"cred_0131\",\"cred_0132\",\"cred_0133\",\"cred_0134\",\"cred_0135\",\"cred_0136\",\"cred_0137\",\"cred_0138\",\"cred_0139\",\"cred_0140\",\"cred_0141\",\"cred_0142\",\"cred_0143\",\"cred_0144\",\"cred_0145\",\"cred_0146\",\"cred_0147\",\"cred_0148\",\"cred_0149\",\"cred_0150\",\"cred_0151\",\"cred_0152\",\"cred_0153\",\"cred_0154\",\"cred_0155\",\"cred_0156\",\"cred_0157\",\"cred_0158\",\"cred_0159\",\"cred_0160\",\"cred_0161\",\"cred_0162\",\"cred_0163\",\"cred_0164\",\"cred_0165\",\"cred_0166\",\"cred_0167\",\"cred_0168\",\"cred_0169\",\"cred_0170\",\"cred_0171\",\"cred_0172\",\"cred_0173\",\"cred_0174\",\"cred_0175\",\"cred_0176\",\"cred_0177\",\"cred_0178\",\"cred_0179\",\"cred_0180\",\"cred_0181\",\"cred_0182\",\"cred_0183\",\"cred_0184\",\"cred_0185\",\"cred_0186\",\"cred_0187\",\"cred_0188\",\"cred_0189\",\"cred_0190\",\"cred_0191\",\"cred_0192\",\"cred_0193\",\"cred_0194\",\"cred_0195\",\"cred_0196\",\"cred_0197\",\"cred_0198\",\"cred_0199\",\"cred_0200\",\"cred_0201\",\"cred_0202\",\"cred_0203\",\"cred_0204\",\"cred_0205\",\"cred_0206\",\"cred_0207\",\"cred_0208\",\"cred_0209\",\"cred_0210\",\"cred_0211\",\"cred_0212\",\"cred_0213\",\"cred_0214\",\"cred_0215\",\"cred_0216\",\"cred_0217\",\"cred_0218\",\"cred_0219\",\"cred_0220\",\"cred_0221\",\"cred_0222\",\"cred_0223\",\"cred_0224\",\"cred_0225\",\"cred_0226\",\"cred_0227\",\"cred_0228\",\"cred_0229\",\"cred_0230\",\"cred_0231\",\"cred_0232\",\"cred_0233\",\"cred_0234\",\"cred_0235\",\"cred_0236\",\"cred_0237\",\"cred_0238\",\"cred_0239\",\"cred_0240\",\"cred_0241\",\"cred_0242\",\"cred_0243\",\"cred_0244\",\"cred_0245\",\"cred_0246\",\"cred_0247\",\"cred_0248\",\"cred_0249\",\"cred_0250\",\"cred_0251\",\"cred_0252\",\"cred_0253\",\"cred_0254\",\"cred_0255\",\"cred_0256\",\"cred_0257\",\"cred_0258\",\"cred_0259\",\"cred_0260\",\"cred_0261\",\"cred_0262\",\"cred_0263\",\"cred_0264\",\"cred_0265\",\"cred_0266\",\"cred_0267\",\"cred_0268\",\"cred_0269\",\"cred_0270\",\"cred_0271\",\"cred_0272\",\"cred_0273\",\"cred_0274\",\"cred_0275\",\"cred_0276\",\"cred_0277\",\"cred_0278\",\"cred_0279\",\"cred_0280\",\"cred_0281\",\"cred_0282\",\"cred_0283\",\"cred_0284\",\"cred_0285\",\"cred_0286\",\"cred_0287\",\"cred_0288\",\"cred_0289\",\"cred_0290\",\"cred_0291\",\"cred_0292\",\"cred_0293\",\"cred_0294\",\"cred_0295\",\"cred_0296\",\"cred_0297\",\"cred_0298\",\"cred_0299\",\"cred_0300\",\"cred_0301\",\"cred_0302\",\"cred_0303\",\"cred_0304\",\"cred_0305\",\"cred_0306\",\"cred_0307\",\"cred_0308\",\"cred_0309\",\"cred_0310\",\"cred_0311\",\"cred_0312\",\"cred_0313\",\"cred_0314\",\"cred_0315\",\"cred_0316\",\"cred_0317\",\"cred_0318\",\"cred_0319\",\"cred_0320\",\"cred_0321\",\"cred_0322\",\"cred_0323\",\"cred_0324\",\"cred_0325\",\"cred_0326\",\"cred_0327\",\"cred_0328\",\"cred_0329\",\"cred_0330\",\"cred_0331\",\"cred_0332\",\"cred_0333\",\"cred_0334\",\"cred_0335\",\"cred_0336\",\"cred_0337\",\"cred_0338\",\"cred_0339\",\"cred_0340\",\"cred_0341\",\"cred_0342\",\"cred_0343\",\"cred_0344\",\"cred_0345\",\"cred_0346\",\"cred_0347\",\"cred_0348\",\"cred_0349\",\"cred_0350\",\"cred_0351\",\"cred_0352\",\"cred_0353\",\"cred_0354\",\"cred_0355\",\"cred_0356\",\"cred_0357\",\"cred_0358\",\"cred_0359\",\"cred_0360\",\"cred_0361\",\"cred_0362\",\"cred_0363\",\"cred_0364\",\"cred_0365\",\"cred_0366\",\"cred_0367\",\"cred_0368\",\"cred_0369\",\"cred_0370\",\"cred_0371\",\"cred_0372\",\"cred_0373\",\"cred_0374\",\"cred_0375\",\"cred_0376\",\"cred_0377\",\"cred_0378\",\"cred_0379\",\"cred_0380\",\"cred_0381\",\"cred_0382\",\"cred_0383\",\"cred_0384\",\"cred_0385\",\"cred_0386\",\"cred_0387\",\"cred_0388\",\"cred_0389\",\"cred_0390\",\"cred_0391\",\"cred_0392\",\"cred_0393\",\"cred_0394\",\"cred_0395\",\"cred_0396\",\"cred_0397\",\"cred_0398\",\"cred_0399\",\"cred_0400\",\"cred_0401\",\"cred_0402\",\"cred_0403\",\"cred_0404\",\"cred_0405\",\"cred_0406\",\"cred_0407\",\"cred_0408\",\"cred_0409\",\"cred_0410\",\"cred_0411\",\"cred_0412\",\"cred_0413\",\"cred_0414\",\"cred_0415\",\"cred_0416\",\"cred_0417\",\"cred_0418\",\"cred_0419\",\"cred_0420\",\"cred_0421\",\"cred_0422\",\"cred_0423\",\"cred_0424\",\"cred_0425\",\"cred_0426\",\"cred_0427\",\"cred_0428\",\"cred_0429\",\"cred_0430\",\"cred_0431\",\"cred_0432\",\"cred_0433\",\"cred_0434\",\"cred_0435\",\"cred_0436\",\"cred_0437\",\"cred_0438\",\"cred_0439\",\"cred_0440\",\"cred_0441\",\"cred_0442\",\"cred_0443\",\"cred_0444\",\"cred_0445\",\"cred_0446\",\"cred_0447\",\"cred_0448\",\"cred_0449\",\"cred_0450\",\"cred_0451\",\"cred_0452\",\"cred_0453\",\"cred_0454\",\"cred_0455\",\"cred_0456\",\"cred_0457\",\"cred_0458\",\"cred_0459\",\"cred_0460\",\"cred_0461\",\"cred_0462\",\"cred_0463\",\"cred_0464\",\"cred_0465\",\"cred_0466\",\"cred_0467\",\"cred_0468\",\"cred_0469\",\"cred_0470\",\"cred_0471\",\"cred_0472\",\"cred_0473\",\"cred_0474\",\"cred_0475\",\"cred_0476\",\"cred_0477\",\"cred_0478\",\"cred_0479\",\"cred_0480\",\"cred_0481\",\"cred_0482\",\"cred_0483\",\"cred_0484\",\"cred_0485\",\"cred_0486\",\"cred_0487\",\"cred_0488\",\"cred_0489\",\"cred_0490\",\"cred_0491\",\"cred_0492\",\"cred_0493\",\"cred_0494\",\"cred_0495\",\"cred_0496\",\"cred_0497\",\"cred_0498\",\"cred_0499\",\"cred_0500\",\"cred_0501\",\"cred_0502\",\"cred_0503\",\"cred_0504\",\"cred_0505\",\"cred_0506\",\"cred_0507\",\"cred_0508\",\"cred_0509\",\"cred_0510\",\"cred_0511\",\"cred_0512\",\"cred_0513\",\"cred_0514\",\"cred_0515\",\"cred_0516\",\"cred_0517\",\"cred_0518\",\"cred_0519\",\"cred_0520\",\"cred_0521\",\"cred_0522\",\"cred_0523\",\"cred_0524\",\"cred_0525\",\"cred_0526\",\"cred_0527\",\"cred_0528\",\"cred_0529\",\"cred_0530\",\"cred_0531\",\"cred_0532\",\"cred_0533\",\"cred_0534\",\"cred_0535\",\"cred_0536\",\"cred_0537\",\"cred_0538\",\"cred_0539\",\"cred_0540\",\"cred_0541\",\"cred_0542\",\"cred_0543\",\"cred_0544\",\"cred_0545\",\"cred_0546\",\"cred_0547\",\"cred_0548\",\"cred_0549\",\"cred_0550\",\"cred_0551\",\"cred_0552\",\"cred_0553\",\"cred_0554\",\"cred_0555\",\"cred_0556\",\"cred_0557\",\"cred_0558\",\"cred_0559\",\"cred_0560\",\"cred_0561\",\"cred_0562\",\"cred_0563\",\"cred_0564\",\"cred_0565\",\"cred_0566\",\"cred_0567\",\"cred_0568\",\"cred_0569\",\"cred_0570\",\"cred_0571\",\"cred_0572\",\"cred_0573\",\"cred_0574\",\"cred_0575\",\"cred_0576\",\"cred_0577\",\"cred_0578\",\"cred_0579\",\"cred_0580\",\"cred_0581\",\"cred_0582\",\"cred_0583\",\"cred_0584\",\"cred_0585\",\"cred_0586\",\"cred_0587\",\"cred_0588\",\"cred_0589\",\"cred_0590\",\"cred_0591\",\"cred_0592\",\"cred_0593\",\"cred_0594\",\"cred_0595\",\"cred_0596\",\"cred_0597\",\"cred_0598\",\"cred_0599\",\"cred_0600\",\"cred_0601\",\"cred_0602\",\"cred_0603\",\"cred_0604\",\"cred_0605\",\"cred_0606\",\"cred_0607\",\"cred_0608\",\"cred_0609\",\"cred_0610\",\"cred_0611\",\"cred_0612\",\"cred_0613\",\"cred_0614\",\"cred_0615\",\"cred_0616\",\"cred_0617\",\"cred_0618\",\"cred_0619\",\"cred_0620\",\"cred_0621\",\"cred_0622\",\"cred_0623\",\"cred_0624\",\"cred_0625\",\"cred_0626\",\"cred_0627\",\"cred_0628\",\"cred_0629\",\"cred_0630\",\"cred_0631\",\"cred_0632\",\"cred_0633\",\"cred_0634\",\"cred_0635\",\"cred_0636\",\"cred_0637\",\"cred_0638\",\"cred_0639\",\"cred_0640\",\"cred_0641\",\"cred_0642\",\"cred_0643\",\"cred_0644\",\"cred_0645\",\"cred_0646\",\"cred_0647\",\"cred_0648\",\"cred_0649\",\"cred_0650\",\"cred_0651\",\"cred_0652\",\"cred_0653\",\"cred_0654\",\"cred_0655\",\"cred_0656\",\"cred_0657\",\"cred_0658\",\"cred_0659\",\"cred_0660\",\"cred_0661\",\"cred_0662\",\"cred_0663\",\"cred_0664\",\"cred_0665\",\"cred_0666\",\"cred_0667\",\"cred_0668\",\"cred_0669\",\"cred_0670\",\"cred_0671\",\"cred_0672\",\"cred_0673\",\"cred_0674\",\"cred_0675\",\"cred_0676\",\"cred_0677\",\"cred_0678\",\"cred_0679\",\"cred_0680\",\"cred_0681\",\"cred_0682\",\"cred_0683\",\"cred_0684\",\"cred_0685\",\"cred_0686\",\"cred_0687\",\"cred_0688\",\"cred_0689\",\"cred_0690\",\"cred_0691\",\"cred_0692\",\"cred_0693\",\"cred_0694\",\"cred_0695\",\"cred_0696\",\"cred_0697\",\"cred_0698\",\"cred_0699\",\"cred_0700\",\"cred_0701\",\"cred_0702\",\"cred_0703\",\"cred_0704\",\"cred_0705\",\"cred_0706\",\"cred_0707\",\"cred_0708\",\"cred_0709\",\"cred_0710\",\"cred_0711\",\"cred_0712\",\"cred_0713\",\"cred_0714\",\"cred_0715\",\"cred_0716\",\"cred_0717\",\"cred_0718\",\"cred_0719\",\"cred_0720\",\"cred_0721\",\"cred_0722\",\"cred_0723\",\"cred_0724\",\"cred_0725\",\"cred_0726\",\"cred_0727\",\"cred_0728\",\"cred_0729\",\"cred_0730\",\"cred_0731\",\"cred_0732\",\"cred_0733\",\"cred_0734\",\"cred_0735\",\"cred_0736\",\"cred_0737\",\"cred_0738\",\"cred_0739\",\"cred_0740\",\"cred_0741\",\"cred_0742\",\"cred_0743\",\"cred_0744\",\"cred_0745\",\"cred_0746\",\"cred_0747\",\"cred_0748\",\"cred_0749\",\"cred_0750\",\"cred_0751\",\"cred_0752\",\"cred_0753\",\"cred_0754\",\"cred_0755\",\"cred_0756\",\"cred_0757\",\"cred_0758\",\"cred_0759\",\"cred_0760\",\"cred_0761\",\"cred_0762\",\"cred_0763\",\"cred_0764\",\"cred_0765\",\"cred_0766\",\"cred_0767\",\"cred_0768\",\"cred_0769\",\"cred_0770\",\"cred_0771\",\"cred_0772\",\"cred_0773\",\"cred_0774\",\"cred_0775\",\"cred_0776\",\"cred_0777\",\"cred_0778\",\"cred_0779\",\"cred_0780\",\"cred_0781\",\"cred_0782\",\"cred_0783\",\"cred_0784\",\"cred_0785\",\"cred_0786\",\"cred_0787\",\"cred_0788\",\"cred_0789\",\"cred_0790\",\"cred_0791\",\"cred_0792\",\"cred_0793\",\"cred_0794\",\"cred_0795\",\"cred_0796\",\"cred_0797\",\"cred_0798\",\"cred_0799\",\"cred_0800\",\"cred_0801\",\"cred_0802\",\"cred_0803\",\"cred_0804\",\"cred_0805\",\"cred_0806\",\"cred_0807\",\"cred_0808\",\"cred_0809\",\"cred_0810\",\"cred_0811\",\"cred_0812\",\"cred_0813\",\"cred_0814\",\"cred_0815\",\"cred_0816\",\"cred_0817\",\"cred_0818\",\"cred_0819\",\"cred_0820\",\"cred_0821\",\"cred_0822\",\"cred_0823\",\"cred_0824\",\"cred_0825\",\"cred_0826\",\"cred_0827\",\"cred_0828\",\"cred_0829\",\"cred_0830\",\"cred_0831\",\"cred_0832\",\"cred_0833\",\"cred_0834\",\"cred_0835\",\"cred_0836\",\"cred_0837\",\"cred_0838\",\"cred_0839\",\"cred_0840\",\"cred_0841\",\"cred_0842\",\"cred_0843\",\"cred_0844\",\"cred_0845\",\"cred_0846\",\"cred_0847\",\"cred_0848\",\"cred_0849\",\"cred_0850\",\"cred_0851\",\"cred_0852\",\"cred_0853\",\"cred_0854\",\"cred_0855\",\"cred_0856\",\"cred_0857\",\"cred_0858\",\"cred_0859\",\"cred_0860\",\"cred_0861\",\"cred_0862\",\"cred_0863\",\"cred_0864\",\"cred_0865\",\"cred_0866\",\"cred_0867\",\"cred_0868\",\"cred_0869\",\"cred_0870\",\"cred_0871\",\"cred_0872\",\"cred_0873\",\"cred_0874\",\"cred_0875\",\"cred_0876\",\"cred_0877\",\"cred_0878\",\"cred_0879\",\"cred_0880\",\"cred_0881\",\"cred_0882\",\"cred_0883\",\"cred_0884\",\"cred_0885\",\"cred_0886\",\"cred_0887\",\"cred_0888\",\"cred_0889\",\"cred_0890\",\"cred_0891\",\"cred_0892\",\"cred_0893\",\"cred_0894\",\"cred_0895\",\"cred_0896\",\"cred_0897\",\"cred_0898\",\"cred_0899\",\"cred_0900\",\"cred_0901\",\"cred_0902\",\"cred_0903\",\"cred_0904\",\"cred_0905\",\"cred_0906\",\"cred_0907\",\"cred_0908\",\"cred_0909\",\"cred_0910\",\"cred_0911\",\"cred_0912\",\"cred_0913\",\"cred_0914\",\"cred_0915\",\"cred_0916\",\"cred_0917\",\"cred_0918\",\"cred_0919\",\"cred_0920\",\"cred_0921\",\"cred_0922\",\"cred_0923\",\"cred_0924\",\"cred_0925\",\"cred_0926\",\"cred_0927\",\"cred_0928\",\"cred_0929\",\"cred_0930\",\"cred_0931\",\"cred_0932\",\"cred_0933\",\"cred_0934\",\"cred_0935\",\"cred_0936\",\"cred_0937\",\"cred_0938\",\"cred_0939\",\"cred_0940\",\"cred_0941\",\"cred_0942\",\"cred_0943\",\"cred_0944\",\"cred_0945\",\"cred_0946\",\"cred_0947\",\"cred_0948\",\"cred_0949\",\"cred_0950\",\"cred_0951\",\"cred_0952\",\"cred_0953\",\"cred_0954\",\"cred_0955\",\"cred_0956\",\"cred_0957\",\"cred_0958\",\"cred_0959\",\"cred_0960\",\"cred_0961\",\"cred_0962\",\"cred_0963\",\"cred_0964\",\"cred_0965\",\"cred_0966\",\"cred_0967\",\"cred_0968\",\"cred_0969\",\"cred_0970\",\"cred_0971\",\"cred_0972\",\"cred_0973\",\"cred_0974\",\"cred_0975\",\"cred_0976\",\"cred_0977\",\"cred_0978\",\"cred_0979\",\"cred_0980\",\"cred_0981\",\"cred_0982\",\"cred_0983\",\"cred_0984\",\"cred_0985\",\"cred_0986\",\"cred_0987\",\"cred_0988\",\"cred_0989\",\"cred_0990\",\"cred_0991\",\"cred_0992\",\"cred_0993\",\"cred_0994\",\"cred_0995\",\"cred_0996\",\"cred_0997\",\"cred_0998\",\"cred_0999\",\"cred_1000\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_ids_unsorted",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":2,\"revoked_credential_ids\":[\"cred_b\",\"cred_a\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_ids_repeated",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":2,\"revoked_credential_ids\":[\"cred_a\",\"cred_a\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_ids_out_of_byte_order",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":2,\"revoked_credential_ids\":[\"cred_a\",\"Cred_b\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "status_key_upper_case",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012CB90CA60E8E5D8DAF66E2272D2233E0486D557E8C66141ED8920177D7EB7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "another_operations_success_status_for_restore",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"server_time\":1790000000000000,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\",\"operation_state\":\"restored\",\"expires_at\":1790000300000000,\"settles_at\":null,\"restored_at\":1790000000000000,\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"enrolled_state\":null,\"enrolled_admin_id\":null,\"enrolled_credential_id\":null,\"enrolled_trust_anchor_sha256\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "another_operations_success_restore_for_status",
+      "op": "status",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_count\":1,\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
     }
   ]
 }

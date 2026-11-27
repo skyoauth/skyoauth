@@ -58,8 +58,9 @@
 //! does: 64 bytes, then `ed25519-dalek`'s `verify_strict`. The result,
 //! [`SignedResponse`], is the challenge's operation ID and the 64 bytes.
 //!
-//! The seed of a [`SoftwareSigner`] is never written or shown, but it is
-//! not wiped from memory on drop (see [`SoftwareSigner`], "The seed").
+//! The seed of a [`SoftwareSigner`] is never written or shown, and the
+//! signer's copies are wiped from memory, as a best effort with documented
+//! limits (see [`SoftwareSigner`], "The seed").
 //!
 //! The fixtures `tests/conformance/fixtures/_recovery/key.v1.json`,
 //! `challenge.v1.json` and `signature.v1.json` hold the known answers both

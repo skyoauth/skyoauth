@@ -539,12 +539,15 @@ pub use operator::{
 use operator::{create_admin_credential, create_admin_identity, create_admin_role_binding};
 pub use predicate::{GITHUB_JOB_WORKFLOW_REF, required_claims, validate_claim_match_policy};
 pub use recovery::{
-    ChallengeError, DEFAULT_CHALLENGE_TTL, IssueChallenge, MAX_CHALLENGE_TTL, MIN_CHALLENGE_TTL,
-    NotRestorableReason, OPERATOR_RESTORATION, PLAN_ADMIN_ID, PLAN_BINDING_ID, PLAN_CREDENTIAL_ID,
-    PLAN_INSTANCE_ID, PLAN_NEW_RECOVERY_PUBLIC_KEY, PLAN_PUBLIC_IDENTITY, PLAN_RECOVERY_KEY_EPOCH,
-    PLAN_TRUST_ANCHOR_REF, RecoveryChallenge, RecoveryPreview, RecoveryState, RestoreError,
-    RestoreRequest, Restored, SignedRecoveryResponse, get_recovery_state, issue_recovery_challenge,
-    preview_recovery_response, restore_operator,
+    ChallengeError, ChallengeStatus, DEFAULT_CHALLENGE_TTL, EnrolledCredential, EnrolledState,
+    Enrollment, IssueChallenge, MAX_CHALLENGE_TTL, MIN_CHALLENGE_TTL, NotRestorableReason,
+    OPERATOR_RESTORATION, PLAN_ADMIN_ID, PLAN_BINDING_ID, PLAN_CREDENTIAL_ID, PLAN_INSTANCE_ID,
+    PLAN_NEW_RECOVERY_PUBLIC_KEY, PLAN_PUBLIC_IDENTITY, PLAN_RECOVERY_KEY_EPOCH,
+    PLAN_TRUST_ANCHOR_REF, REVOKED_IDS_PAGE_SIZE, RecoveryChallenge, RecoveryPreview,
+    RecoveryState, RecoveryStatus, Restoration, RestoreError, RestoreRequest, Restored,
+    RevokedPage, SignedRecoveryResponse, StatusError, StatusQuery, get_recovery_state,
+    issue_recovery_challenge, preview_recovery_response, read_recovery_status, restore_operator,
+    revoked_by_restoration,
 };
 pub use selection::{Selection, SelectionError, select_grant};
 pub use tenant::{get_principal, get_tenant, list_principals, list_tenants};

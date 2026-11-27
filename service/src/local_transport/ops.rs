@@ -1,7 +1,8 @@
-//! The four operations: each checks its wire values, generates its IDs,
+//! The five operations: each checks its wire values, generates its IDs,
 //! runs one `READ COMMITTED` transaction around one registry call, and
-//! commits only on success (see the module docs of
-//! [`crate::local_transport`], "Operations" and "Transactions").
+//! commits only on success; `preview` and `status` never commit (see the
+//! module docs of [`crate::local_transport`], "Operations" and
+//! "Transactions").
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,19 +15,23 @@ use super::{
     connection::refusal,
     error::{
         ErrorCode, from_bootstrap, from_challenge, from_id, from_registry, from_restore,
-        from_store_failure,
+        from_status, from_store_failure,
     },
-    wire::{BootstrapWire, IssueWire, Reply, Request, ResponseWire, decode_hex, encode_hex},
+    wire::{
+        BootstrapWire, IssueWire, Reply, Request, ResponseWire, StatusReply, StatusWire,
+        decode_hex, encode_hex,
+    },
 };
 use crate::identity::canonical_public_identity;
 use crate::ids::IdKind;
 use crate::persistence::registry::{
-    BootstrapRequest, IssueChallenge, JsonObject, OPERATOR_RESTORATION, PLAN_ADMIN_ID,
-    PLAN_BINDING_ID, PLAN_CREDENTIAL_ID, PLAN_INSTANCE_ID, PLAN_NEW_RECOVERY_PUBLIC_KEY,
-    PLAN_PUBLIC_IDENTITY, PLAN_RECOVERY_KEY_EPOCH, PLAN_TRUST_ANCHOR_REF, RecoveryChallenge,
-    RestoreRequest, SignedRecoveryResponse, bootstrap_instance, get_recovery_state,
-    is_lowercase_uuid_v7, issue_recovery_challenge, preview_recovery_response, recovery_key,
-    restore_operator,
+    BootstrapRequest, ChallengeStatus, EnrolledState, Enrollment, IssueChallenge, JsonObject,
+    OPERATOR_RESTORATION, PLAN_ADMIN_ID, PLAN_BINDING_ID, PLAN_CREDENTIAL_ID, PLAN_INSTANCE_ID,
+    PLAN_NEW_RECOVERY_PUBLIC_KEY, PLAN_PUBLIC_IDENTITY, PLAN_RECOVERY_KEY_EPOCH,
+    PLAN_TRUST_ANCHOR_REF, RecoveryChallenge, RecoveryStatus, RestoreRequest,
+    SignedRecoveryResponse, StatusQuery, bootstrap_instance, get_recovery_state,
+    is_lowercase_uuid_v7, issue_recovery_challenge, preview_recovery_response,
+    read_recovery_status, recovery_key, restore_operator, revoked_by_restoration,
 };
 
 /// Every transaction of the transport: `restore_operator` runs only at
@@ -84,6 +89,7 @@ pub(super) async fn execute(shared: &Shared, request: Request, deadline: Instant
         Request::IssueChallenge(wire) => issue(shared, wire, deadline).await,
         Request::Preview(wire) => preview(shared, wire, deadline).await,
         Request::Restore(wire) => restore(shared, wire, deadline).await,
+        Request::Status(wire) => status(shared, wire, deadline).await,
     };
     match result {
         Ok(reply) => Some(reply),
@@ -485,7 +491,12 @@ async fn preview(shared: &Shared, wire: ResponseWire, deadline: Instant) -> Resu
     })
 }
 
-/// `restore`: [`restore_operator`], which verifies the signature itself.
+/// `restore`: [`restore_operator`], which verifies the signature itself,
+/// then, in the same transaction before the commit, the count and the
+/// first page of the credentials it revoked by the predicate `status` uses
+/// ([`revoked_by_restoration`]: a plain statement, no barrier), so the
+/// reply and a later `status` agree (absent a tie). A failure of that read
+/// rolls the restore back.
 async fn restore(shared: &Shared, wire: ResponseWire, deadline: Instant) -> Result<Reply, Stop> {
     let signature = signature(&wire)?;
     let audit_event_id = new_id(shared, IdKind::AuditEvent)?;
@@ -505,24 +516,133 @@ async fn restore(shared: &Shared, wire: ResponseWire, deadline: Instant) -> Resu
                 rotation_audit_event_id: &rotation_audit_event_id,
                 now: shared.clock.now(),
             };
-            let result = restore_operator(&mut transaction, &response, &request)
-                .await
-                .map_err(|err| from_restore(&err));
+            let result = match restore_operator(&mut transaction, &response, &request).await {
+                Ok(restored) => revoked_by_restoration(&mut transaction, &wire.operation_id)
+                    .await
+                    .map(|revoked| (restored, revoked))
+                    .map_err(|err| from_status(&err)),
+                Err(err) => Err(from_restore(&err)),
+            };
             finish(transaction, result).await
         })
         .await
     }
     .await;
     settle(link, &restored);
-    let restored = restored?;
+    let (restored, revoked) = restored?;
     Ok(Reply::Restored {
         admin_id: restored.admin_id,
         credential_id: restored.credential_id,
         binding_id: restored.binding_id,
-        revoked_credential_ids: restored.revoked_credential_ids,
+        revoked_credential_count: revoked.count,
+        revoked_credential_ids: revoked.ids,
         recovery_key_epoch: restored.recovery_key_epoch,
         recovery_state_revision: restored.recovery_state_revision,
     })
+}
+
+/// `status`: [`read_recovery_status`], in a transaction that is always
+/// rolled back (it writes nothing), with the transaction timeout as the
+/// expiry's margin.
+async fn status(shared: &Shared, wire: StatusWire, deadline: Instant) -> Result<Reply, Stop> {
+    if wire.revoked_after.is_some() && wire.operation_id.is_none() {
+        return Err(ErrorCode::InvalidRequest.into());
+    }
+    for id in [&wire.operation_id, &wire.revoked_after]
+        .into_iter()
+        .flatten()
+    {
+        check_operation_id(id)?;
+    }
+    let public_identity = wire
+        .credential_spki
+        .as_deref()
+        .map(credential_identity)
+        .transpose()?;
+    let query = StatusQuery {
+        operation_id: wire.operation_id.as_deref(),
+        public_identity: public_identity.as_deref(),
+        revoked_after: wire.revoked_after.as_deref(),
+        settle: shared.settings.transaction_timeout,
+    };
+    let mut link = acquire(shared, deadline).await?;
+    let status = async {
+        let mut transaction = begin(&mut link, deadline).await?;
+        within(shared, async {
+            set_timeouts(shared, &mut transaction).await?;
+            // `now` after the barrier, which the registry takes first.
+            let result =
+                read_recovery_status(&mut transaction, &query, || shared.clock.now()).await;
+            // Written nothing to keep: a failed rollback changes no answer.
+            let _ = transaction.rollback().await;
+            result.map_err(|err| Stop::from(from_status(&err)))
+        })
+        .await
+    }
+    .await;
+    settle(link, &status);
+    Ok(Reply::Status(Box::new(status_reply(status?)?)))
+}
+
+/// The `status` reply of what [`read_recovery_status`] read.
+fn status_reply(status: RecoveryStatus) -> Result<StatusReply, ErrorCode> {
+    let mut reply = StatusReply {
+        server_time: micros(status.server_time)?,
+        ..StatusReply::default()
+    };
+    if let Some(state) = status.state {
+        reply.instance_id = Some(state.instance_id);
+        reply.recovery_key_epoch = Some(state.recovery_key_epoch);
+        reply.recovery_state_revision = Some(state.revision);
+        reply.recovery_public_key = Some(encode_hex(&state.recovery_public_key));
+    }
+    if let Some(challenge) = status.challenge {
+        let (name, expires_at) = match challenge {
+            ChallengeStatus::NotFound => ("not_found", None),
+            ChallengeStatus::Restored {
+                expires_at,
+                restoration,
+            } => {
+                reply.restored_at = Some(micros(restoration.restored_at)?);
+                reply.admin_id = Some(restoration.admin_id);
+                reply.credential_id = Some(restoration.credential_id);
+                reply.binding_id = Some(restoration.binding_id);
+                reply.revoked_credential_count = Some(restoration.revoked.count);
+                reply.revoked_credential_ids = Some(restoration.revoked.ids);
+                ("restored", Some(expires_at))
+            }
+            ChallengeStatus::Revoked { expires_at } => ("revoked", Some(expires_at)),
+            ChallengeStatus::Retired { expires_at } => ("retired", Some(expires_at)),
+            ChallengeStatus::Issued { expires_at } => ("issued", Some(expires_at)),
+            ChallengeStatus::Expiring {
+                expires_at,
+                settles_at,
+            } => {
+                reply.settles_at = Some(micros(settles_at)?);
+                ("expiring", Some(expires_at))
+            }
+            ChallengeStatus::Expired { expires_at } => ("expired", Some(expires_at)),
+        };
+        reply.operation_state = Some(name);
+        reply.expires_at = expires_at.map(micros).transpose()?;
+    }
+    if let Some(enrolled) = status.enrolled {
+        reply.enrolled_state = Some(match enrolled {
+            Enrollment::NotFound => "not_found",
+            Enrollment::Found(credential) => {
+                reply.enrolled_admin_id = Some(credential.admin_id);
+                reply.enrolled_credential_id = Some(credential.credential_id);
+                reply.enrolled_trust_anchor_sha256 =
+                    Some(encode_hex(&credential.trust_anchor_sha256));
+                match credential.state {
+                    EnrolledState::Enabled => "enabled",
+                    EnrolledState::Disabled => "disabled",
+                    EnrolledState::Revoked => "revoked",
+                }
+            }
+        });
+    }
+    Ok(reply)
 }
 
 #[cfg(test)]

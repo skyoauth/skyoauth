@@ -355,10 +355,20 @@ change (ADRs ratified directionally, maintainer, 2026-11-24):
   stored ones, with the instance, the epoch and the revision. The offline
   signing, and the operator's checks of a challenge before it signs, are in
   the operator crate (`skyoauth-operator`), which does not depend on the
-  service; the bytes are in the challenge and signature bullet below. No
-  registry getter returns the operation row (lead ruling). The restoration
-  runs the consume inside the same savepoint as its writes (inferred), so a
-  failed restoration leaves the challenge unconsumed.
+  service; the bytes are in the challenge and signature bullet below. The
+  recovery read never returns the operation row: beside the restoration's
+  own check of the row, two registry functions read it, one returning only
+  the closed state of a recovery challenge and the projection of "Reading
+  the recovery state", the other, for the restoration's own reply, only the
+  count and first page of the credentials a restoration revoked, by the
+  same predicate (lead ruling, 2026-11-27). The registry's operation getters,
+  `get_administrative_operation` (by the kinds its caller names) and
+  `lock_administrative_operation` (by ID), return the full row; no caller
+  exposes an `operator_restoration` row (the D4 reads name only the five
+  gated-write kinds; the approval paths refuse that kind via
+  `OperationKind::from_name`). The restoration runs the consume inside the
+  same savepoint as its writes (inferred), so a failed restoration leaves
+  the challenge unconsumed.
 - **The challenge and the signature.** The challenge the service issues, the
   bytes the recovery key signs and the signature are defined by
   `service/src/persistence/registry/recovery.rs` ("What is signed") and
@@ -378,7 +388,13 @@ change (ADRs ratified directionally, maintainer, 2026-11-24):
   last (lead ruling): `admin_identity.restore` with the new operator's ID
   as `object_id` and no revisions, then `recovery_state.rotate_key` with
   the `instance_id` as `object_id` and the `RecoveryState` revisions before
-  and after (inferred: the envelope has no member for the operation).
+  and after (inferred: the envelope has no member for the operation). The
+  local transport's reply carries the number of revoked credentials and a
+  bounded number of their IDs (the transport's page size, pinned by the
+  wire fixture), the first in byte order; `status` returns the rest. Both
+  select the credentials whose `revoked_at` equals the operation's
+  `consumed_at`: membership is by timestamp, so a clock that repeats a
+  microsecond can add another revocation's credentials.
 - **Concurrent operator writes.** The operator writes that can add
   enabled access (creating an identity, a credential or a role assignment,
   and re-enabling a role assignment) lock the `RecoveryState` row
@@ -416,6 +432,24 @@ change (ADRs ratified directionally, maintainer, 2026-11-24):
   operation `restored` and the recovery state at the new epoch, and one
   that did not commit restores. If the challenge expired before the retry,
   the retry is refused as well and the service issues a new challenge.
+- **Reading the recovery state.** The deployment-local transport serves
+  one operation, `status`, that changes no row, under the peer check of
+  bootstrap and restoration. It appends no audit event, and consumes,
+  extends and grants nothing. It reports the `RecoveryState` (instance,
+  key epoch, revision, current recovery public key); for a named
+  operation ID, the state of an `operator_restoration` challenge (not
+  found, restored, revoked, retired, issued, expiring or expired), its
+  expiry and restoration time, and, once restored, the replacement's
+  IDs and the credentials the restoration revoked, a bounded number at
+  a time (the transport's page size, pinned by the wire fixture); and,
+  for a named mTLS key, whether a credential with its public identity
+  exists, its operator, its state and the SHA-256 of its trust anchor
+  reference. It returns no challenge, no plan member other than the
+  replacement's IDs, no request digest, challenge hash or signature,
+  and does not distinguish another kind of operation from a missing
+  one. A challenge reported expired is not final (see
+  "Challenge TTL and time"). It is the reconcile step of the
+  uncertain-commit rule above.
 - **Challenge TTL and time.** A challenge lives 5 minutes by default and at
   most 15 (OQ-LT-17, LT-107), and at least 1 second (lead ruling). The
   caller of the registry takes `now` from its own clock immediately before

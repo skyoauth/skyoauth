@@ -26,7 +26,11 @@ and `verify-response` (D1a), `sign` and its seed file (D1b).
   environment; read into a fixed buffer with a size cap, never echoed, never
   shown with `Debug`; on Windows no protection checked, the residual
   documented and the help warning of it; the seed not wiped
-  (`SoftwareSigner` has no `zeroize`), documented. Also lead: every
+  (`SoftwareSigner` has no `zeroize`), documented (since then wiped, by
+  the `zeroize` PR that the user ruled,
+  [tasks §13](../skyoauth-tasks.md#13-m1a-lead-decisions-2026-11-24),
+  "Other rulings of the user": see [the seed file](#the-seed-file)).
+  Also lead: every
   expectation is required for `sign`, and exit 4 is `verify-challenge`'s
   only. D1b review: `--out` required (no response on standard output), the
   file synchronized before success, the seed file read up to 128 bytes with
@@ -309,11 +313,32 @@ Lead rulings (D1b), implemented in `operator/src/bin/skyoauth-operator/seed_file
   file that grew), never echoed: every message names the flag and the kind
   of the failure, never the path, the bytes or the seed; nothing in the
   seed file's reader derives or formats with `Debug`.
-- The seed is not wiped from memory: `SoftwareSigner` is built without
-  `zeroize` (see its documentation), and the binary adds no wiping of its
-  own, which could not be relied on. Wiping is the separate `zeroize` PR
-  (tasks §13), which must cover the binary's read buffer, the decoded
-  `[u8; 32]` seed and the `SigningKey` inside `SoftwareSigner`.
+- The seed is wiped from memory with `zeroize` (volatile writes kept in
+  order by a compiler fence), on every return, refusals and errors
+  included (the `zeroize` PR is the user's ruling; how it is done below is
+  an implementation pick):
+  - the binary reads the file into a fixed buffer that is wiped on drop
+    (`Zeroizing`) (implementation pick);
+  - it decodes the seed in place into a `[u8; 32]` that is wiped on drop,
+    never returned, moved or copied by value (implementation pick);
+  - `SoftwareSigner::from_seed` borrows that array mutably and wipes it in
+    place once the signing key is made, so the caller sees all zeros
+    after (implementation pick), and the binary keeps the signer in its
+    `Result`, borrowed, never moved (implementation pick);
+  - the `SigningKey` inside `SoftwareSigner` is wiped when the signer is
+    dropped: the operator crate builds `ed25519-dalek` with its `zeroize`
+    feature, which adds no crate to the lock file. The service's manifest
+    is unchanged, and a build of the service alone
+    (`-p skyoauth-service`) has `ed25519-dalek` without `zeroize`; a
+    `--workspace` build unifies the feature, so there the service's
+    `ed25519-dalek` is built with `zeroize` too (no change to its set of
+    dependencies: `zeroize` is already in its graph, through `rustls`);
+  - compile-time checks fail the build if the buffer, the seed or
+    `SigningKey` is not wiped on drop (the library's own check for
+    `SigningKey`, the binary's for its buffer and seed), and source checks
+    of the `operator` target pin each wipe (implementation pick).
+
+  What is not covered is listed under [Residuals](#residuals).
 
 ## Residuals
 
@@ -326,10 +351,25 @@ Lead rulings (D1b), implemented in `operator/src/bin/skyoauth-operator/seed_file
 - **macOS access control lists:** the owner and mode check does not see
   them (see [the seed file](#the-seed-file)); remove the ACLs of the seed
   file and of the `--out` directory.
-- **The seed in memory:** not wiped (see [the seed file](#the-seed-file)),
-  so it can reach a core dump or swap while the process runs and after:
-  disable core dumps (`ulimit -c 0`) and use encrypted or no swap on the
-  workstation that signs.
+- **The seed in memory:** wiped once used (see
+  [the seed file](#the-seed-file)), as a best effort. Not covered: copies
+  the system makes (the kernel's page cache of the seed file, swap, a core
+  dump or a hibernation image taken while the seed is held); a bitwise
+  copy the compiler leaves when it moves a value (a move does not wipe
+  its old place, and Rust gives no control over it; the binary moves
+  neither the seed nor the signer); registers, spilled temporaries and
+  intermediate values of the decoding and the signing: in
+  `ed25519-dalek` 3.0.0, `ExpandedSecretKey::from` (run when the signing
+  key is made and for each signature) leaves the 64-byte SHA-512 digest
+  of the seed, which is the expanded key itself, and the `scalar_bytes`
+  copy of its first half on the stack unwiped, and the SHA-512 state
+  over the seed is not wiped; other copies of the seed that a caller of
+  the library made before `SoftwareSigner::from_seed` (the binary makes
+  none); and a process that is killed or aborts before the wipes run.
+  So disable
+  core dumps (`ulimit -c 0`) and use encrypted or no swap on the
+  workstation that signs. The seed never comes from the command line, the
+  environment or standard input.
 - **Named pipes and devices:** a path that is replaced by a named pipe or a
   device between its check and its opening can block the read or have
   side effects (no non-blocking open without a platform dependency); for

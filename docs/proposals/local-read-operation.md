@@ -4,9 +4,10 @@ Status: Reviewed; rulings applied (the lead, 2026-11-27): the design holds
 (A1 `status`, B2 a count with a capped list, exact absent a tie, the
 `FOR SHARE` barrier), review findings F1 to F11 and the third-round items
 (a) to (h) are applied, and Q1 to Q8 are ruled (see "Rulings"). F4 widens what a local peer reads: lead scoping, user
-informed. Not implemented: this text changes no code, no contract, no
-fixture and no test. It answers two rulings of the user (2026-11-27,
-relayed by the lead), recorded in tasks §13 under "Other rulings of the
+informed. Implementation: slice 2 (the service `status`, the restore
+reply bound, the fixture, the operator codec and the five contract
+amendments) is implemented; slice 3 (C4: `LocalClient::status`, the page iterator and the reconcile verdicts) is implemented, and its round trip against the real server runs in `tests/harness/local_client_round_trip.rs` (a dev-dependency of `skyoauth-scenarios` on `skyoauth-operator`, approved by the lead). It answers two rulings
+of the user (2026-11-27, relayed by the lead), recorded in tasks §13 under "Other rulings of the
 user, 2026-11-27": "Read-only socket operation" (an operation that only
 reads is added to the local socket; proposal first, then the
 implementation) and "Restore reply bound" (the `restore` reply's list of
@@ -469,7 +470,7 @@ change and goes to the user; the user is informed, as for the nonce.
 
 ## Contract and code impact
 
-### Contract amendments (proposed wording; not edited here)
+### Contract amendments (now in identity-registry.md, 1 to 3, and public-api.md, 4 and 5)
 
 The break-glass points of identity-registry §5.2 carry no IR number
 (checked); the lead places the text or numbers it. The contract names a
@@ -507,7 +508,9 @@ fixture pins (F9).
    caller names) and `lock_administrative_operation` (by ID), return the
    full row; no caller exposes an `operator_restoration` row (the D4 reads
    name only the five gated-write kinds; the approval paths refuse that
-   kind via `OperationKind::from_name`)." Today's text is wider than the
+   kind via `OperationKind::from_name`)." (As merged, the contract names a
+   second function, for the restore reply's page; the contract's text
+   governs.) Today's text is wider than the
    code (above). Checked: `operation.rs:430-463`, both public
    (`registry/mod.rs:518-521`, :527); the D4 read passes `kinds_of`, a
    subset of `OperationKind::ALL` (`service/src/operation/read.rs:231-238`,
@@ -574,7 +577,10 @@ pins them.
   sent; the count is the same on every page of one walk. A `status` count
   above the restore reply's, or one that changes between pages, is the
   documented tie: restart the walk from `status` alone, once; anything
-  else is an unknown outcome.
+  else is an unknown outcome. A count never falls (`revoked_at` is set
+  once, no credential is deleted), so a walk whose list ends below the
+  largest count seen (the restore reply's included), or without every ID
+  of the restore reply's list, is `PageMismatch`, an unknown outcome.
 - **C4** (the operator slice that uses the socket end to end; its scope is
   not recorded in the repository, `docs/proposals/demo-walkthroughs.md:360`;
   not verified): `LocalClient::status`, the page iterator, and the
