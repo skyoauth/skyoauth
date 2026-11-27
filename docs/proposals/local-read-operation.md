@@ -131,7 +131,7 @@ The type notation is the fixture's, with `|null` for a nullable member
 | `revoked_credential_ids` | `string_list\|null` | when `restored`: the next page of them, in byte order, after `revoked_after` |
 | `enrolled_state` | `string\|null` | null when no `credential_spki` was asked; else `not_found`, `enabled`, `disabled` or `revoked`, for the credential with that public identity |
 | `enrolled_admin_id`, `enrolled_credential_id` | `string\|null` | that credential's operator and ID, when found |
-| `enrolled_trust_anchor_sha256` | `hex\|null` | when found: SHA-256 of that credential's stored `trust_anchor_ref` (its UTF-8 bytes), computed at read time; the table stores the reference, not a digest (`0005_operator.sql:130-138`), and `sha2` is already a service dependency (`service/Cargo.toml:19`) (lead ruling, (b)) |
+| `enrolled_trust_anchor_sha256` | `hex\|null` | when found: the lowercase hex SHA-256 of the exact UTF-8 bytes of the stored `trust_anchor_ref` string (no normalization), hashed by the service at read time; the client hashes exactly the string it sent; the table stores the reference, not a digest (`0005_operator.sql:130-138`), and `sha2` is already a service dependency (`service/Cargo.toml:19`) (lead ruling, (b)) |
 
 A `RecoveryState` row whose `bootstrap_closed` is false still counts as
 closed (identity-registry :298-299), so `instance_id` and the other state
