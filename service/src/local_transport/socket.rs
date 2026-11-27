@@ -1534,7 +1534,8 @@ mod tests {
     /// link's (fresh tmpfs instances, btrfs subvolumes); a unit test cannot
     /// set that up without mounts. The owner case needs root (others cannot
     /// give a directory away) and is skipped otherwise: CI's root step runs
-    /// only `--test local_transport`, so it runs in a manual root run.
+    /// only integration test selections, not the library's own tests, so
+    /// it runs in a manual root run.
     #[test]
     fn a_directory_swapped_in_before_its_check_is_not_verified() {
         // Swaps: the directory at the path is renamed away and `put`

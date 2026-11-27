@@ -33,8 +33,10 @@
 //!   root, for that user's UID (65534 without it).
 //!
 //! A case that cannot run (one that needs root, or as root the peer user)
-//! is skipped with a printed NOTICE; the CI job runs as its runner's user,
-//! so it binds the `service_or_root` cases whose entries are all its own.
+//! is skipped with a printed NOTICE; the CI jobs run it as their runner's
+//! user, which binds the `service_or_root` cases whose entries are all its
+//! own, and the root step of `service-nextest` runs it again as root with
+//! the peer user (`SKYOAUTH_IT_PEER_USER`), which binds every case.
 //! No case is bound where the service does not bind at all
 //! ([`BINDS_SUPPORTED`]: Linux on x86_64, aarch64 and riscv64, where it
 //! knows its `open` flags; elsewhere it stops at its lock file first):
